@@ -61,7 +61,7 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("\n=== Starting E2E Hot Upgrade Test ===\n")
 
     # Scale down to 1 machine to avoid load balancing issues with in-memory counter state
-    System.cmd("fly", ["scale", "count", "1", "-a", @app_name], cd: @test_app_dir)
+    System.cmd("fly", ["scale", "count", "1", "--yes", "-a", @app_name], cd: @test_app_dir)
     Process.sleep(3000)
 
     # Step 1: Deploy initial version (v1)
