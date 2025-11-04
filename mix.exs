@@ -28,7 +28,8 @@ defmodule FlyDeploy.MixProject do
   defp deps do
     [
       {:req, "~> 0.5"},
-      {:finch, "~> 0.20"}
+      {:finch, "~> 0.20"},
+      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end
 
