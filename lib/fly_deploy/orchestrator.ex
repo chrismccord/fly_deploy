@@ -19,7 +19,11 @@ defmodule FlyDeploy.Orchestrator do
     if is_nil(bucket) do
       IO.puts(ansi([:red], "✗ No bucket configured!"))
       IO.puts("")
-      IO.puts("Set bucket in Mix config or ensure BUCKET_NAME env var is set via `fly storage create`")
+
+      IO.puts(
+        "Set bucket in Mix config or ensure BUCKET_NAME env var is set via `fly storage create`"
+      )
+
       System.halt(1)
     end
 

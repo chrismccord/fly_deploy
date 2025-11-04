@@ -335,7 +335,7 @@ defmodule FlyDeploy.E2ETest do
     counter_url = "#{app_url}/api/counter/increment"
 
     Enum.each(1..times, fn _ ->
-      IO.inspect Req.post!(counter_url, retry: :transient, max_retries: 3)
+      Req.post!(counter_url, retry: :transient, max_retries: 3)
     end)
   end
 

@@ -124,7 +124,8 @@ defmodule FlyDeploy.Config do
     %{
       otp_app: otp_app,
       binary_name: Atom.to_string(otp_app),
-      bucket: nil,  # Will be read from BUCKET_NAME env var on Fly machines
+      # Will be read from BUCKET_NAME env var on Fly machines
+      bucket: nil,
       fly_config: "fly.toml",
       env: %{},
       max_concurrency: 20,
