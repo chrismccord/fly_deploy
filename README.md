@@ -328,7 +328,7 @@ Tracks current deployment state:
 }
 ```
 
-## When to use cold deploy instead of hot upgrade**
+## When to use cold deploy instead of hot upgrade
 - Adding/removing services from supervision tree (database, cache, etc.)
 - Changing port numbers, protocols, or network config
 - Enabling/disabling major features that affect app structure
