@@ -336,16 +336,9 @@ Tracks current deployment state:
 
 ## Testing
 
-Run the test suite:
+Run E2E tests (requires a deployed Fly app):
 
 ```bash
 mix test
 ```
-
-Run E2E tests (requires a deployed Fly app):
-
-```bash
-mix test test/fly_deploy/e2e_test.exs --only e2e
-```
-
 
