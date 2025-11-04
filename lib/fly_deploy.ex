@@ -153,6 +153,7 @@ defmodule FlyDeploy do
   @doc """
   Reapplies the current hot upgrade on application startup.
 
+  Detects new cold deploys and resets state automatically.
   This should be called early in `Application.start/2`, after HTTP clients
   are available but before starting the main supervision tree. It checks S3
   for pending hot upgrades matching the current Docker image and reapplies
@@ -169,11 +170,6 @@ defmodule FlyDeploy do
         # ... start supervision tree
       end
 
-  ## Safety
-
-  - Non-blocking - Won't prevent app from starting if check fails
-  - Graceful degradation - Logs errors but doesn't crash
-  - Detects new cold deploys and resets state automatically
   """
   def startup_reapply_current(app) do
     my_image_ref = System.get_env("FLY_IMAGE_REF")
@@ -272,8 +268,6 @@ defmodule FlyDeploy do
     FlyDeploy.ReloadScript.hot_upgrade(tarball_url, app)
   end
 
-  # Private helper functions for startup_reapply_current
-
   defp s3_endpoint do
     System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
   end
@@ -322,7 +316,7 @@ defmodule FlyDeploy do
         {:error, :not_found}
 
       {:ok, %{status: status}} ->
-        {:error, {:unexpected_status, status}}
+        {:error, {:gateway, status}}
 
       {:error, reason} ->
         {:error, reason}
@@ -377,11 +371,11 @@ defmodule FlyDeploy do
     Logger.info("[FlyDeploy] ✅ Hot upgrade applied successfully")
     :ok
   rescue
-    e ->
+    err ->
       Logger.error(
         "[FlyDeploy] Failed to apply startup hot upgrade: #{Exception.format(:error, e, __STACKTRACE__)}"
       )
 
-      {:error, e}
+      {:error, err}
   end
 end

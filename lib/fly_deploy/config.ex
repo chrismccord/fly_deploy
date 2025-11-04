@@ -1,5 +1,6 @@
 defmodule FlyDeploy.Config do
-  @moduledoc """
+  @moduledoc false
+  _archdoc = """
   Configuration builder for hot code upgrades.
 
   Merges configuration from multiple sources with the following priority:
@@ -94,13 +95,8 @@ defmodule FlyDeploy.Config do
       }
   """
   def build(cli_opts \\ []) do
-    # 1. Start with smart defaults
     defaults = smart_defaults()
-
-    # 2. Load from Mix config
     mix_config = get_mix_config()
-
-    # 3. Parse fly.toml
     fly_config_path = cli_opts[:config] || mix_config[:fly_config] || "fly.toml"
 
     fly_config =
@@ -110,7 +106,7 @@ defmodule FlyDeploy.Config do
         %{}
       end
 
-    # 4. Merge: defaults < mix config < fly.toml < cli options
+    # merge: defaults < mix config < fly.toml < cli options
     merged =
       defaults
       |> Map.merge(map_from_keyword(mix_config))
@@ -127,8 +123,6 @@ defmodule FlyDeploy.Config do
   def version(%__MODULE__{otp_app: app}) do
     Application.spec(app, :vsn) |> to_string()
   end
-
-  # Private functions
 
   defp smart_defaults do
     otp_app = get_otp_app()
@@ -157,14 +151,14 @@ defmodule FlyDeploy.Config do
   end
 
   defp get_module_prefix(app) do
-    # Convention: :my_app -> "MyApp"
+    # convention: :my_app -> "MyApp"
     app
     |> Atom.to_string()
     |> Macro.camelize()
   end
 
   defp get_supervisor(module_prefix) do
-    # Convention: MyApp -> MyApp.Supervisor
+    # convention: MyApp -> MyApp.Supervisor
     Module.concat([module_prefix, "Supervisor"])
   end
 
@@ -177,10 +171,9 @@ defmodule FlyDeploy.Config do
   end
 
   defp merge_fly_config(config, fly_config) do
-    # Merge env vars from fly.toml into existing env
     env = Map.merge(config.env || %{}, fly_config[:env] || %{})
 
-    # Use bucket name from fly.toml app name if available
+    # use bucket name from fly.toml app name if available
     bucket =
       if fly_config[:app_name] do
         fly_config.app_name
@@ -194,9 +187,7 @@ defmodule FlyDeploy.Config do
   end
 
   defp apply_cli_opts(config, cli_opts) do
-    # Apply CLI overrides
-    cli_opts
-    |> Enum.reduce(config, fn
+    Enum.reduce(cli_opts, config, fn
       {:config, _path}, acc ->
         # Already handled above
         acc

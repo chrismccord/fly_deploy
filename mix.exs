@@ -13,7 +13,7 @@ defmodule FlyDeploy.MixProject do
       homepage_url: "https://github.com/chrismccord/fly_deploy",
       description: """
       Hot code upgrades for Elixir applications running on Fly.io
-      """,
+      """
     ]
   end
 

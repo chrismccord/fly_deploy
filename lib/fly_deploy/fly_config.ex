@@ -1,5 +1,6 @@
 defmodule FlyDeploy.FlyConfig do
-  @moduledoc """
+  @moduledoc false
+  _archdoc = """
   Parses fly.toml configuration files.
 
   Extracts:
@@ -42,7 +43,6 @@ defmodule FlyDeploy.FlyConfig do
       primary_region: extract_primary_region(content)
     }
 
-    # Validate required env vars if specified
     if required_env = opts[:required_env] do
       validate_required_env!(config.env, required_env, path)
     end
@@ -76,7 +76,7 @@ defmodule FlyDeploy.FlyConfig do
   end
 
   defp parse_env_section(section) do
-    # Parse lines like: KEY = "value" or KEY = 'value'
+    # parse lines like: KEY = "value" or KEY = 'value'
     Regex.scan(~r/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*["']([^"']*)["']/m, section)
     |> Enum.into(%{}, fn [_, key, value] -> {key, value} end)
   end
