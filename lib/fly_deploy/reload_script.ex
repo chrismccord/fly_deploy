@@ -312,13 +312,13 @@ defmodule FlyDeploy.ReloadScript do
 
   defp find_liveview_processes do
     # find all processes running Phoenix.LiveView
+    # LiveView processes have a $process_label key in their dictionary
+    # with format: {Phoenix.LiveView, ModuleName, "lv:phx-..."}
     Process.list()
     |> Enum.filter(fn pid ->
       case Process.info(pid, [:dictionary]) do
         [dictionary: dict] ->
-          # liveView processes have specific keys in their dictionary
-          Keyword.has_key?(dict, :"$initial_call") and
-            match?({Phoenix.LiveView.Channel, _, _}, Keyword.get(dict, :"$initial_call"))
+          match?({Phoenix.LiveView, _, _}, Keyword.get(dict, :"$process_label"))
 
         _ ->
           false
