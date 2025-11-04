@@ -13,31 +13,40 @@ defmodule FlyDeploy.Orchestrator do
     app = Keyword.fetch!(opts, :app)
     image_ref = Keyword.fetch!(opts, :image_ref)
 
+    # get config values from environment variables
+    version = System.get_env("DEPLOY_VERSION")
+    max_concurrency = String.to_integer(System.get_env("DEPLOY_MAX_CONCURRENCY", "20"))
+    timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", "60000"))
+    bucket = System.get_env("DEPLOY_BUCKET") || System.get_env("AWS_BUCKET") || "#{app}-releases"
+
     # track start time
     start_time = System.monotonic_time(:millisecond)
 
+    # ensure S3 bucket exists
+    ensure_bucket_exists(bucket)
+
     # try to acquire deployment lock
     try do
-      acquire_lock(app, image_ref)
+      acquire_lock(app, image_ref, bucket)
 
       # step 1: Build tarball
       {tarball_path, tarball_info} = build_tarball(app)
 
       # step 2: Upload to Tigris
-      url = upload_to_tigris(tarball_path, app)
+      url = upload_to_tigris(tarball_path, app, version, bucket)
 
       # step 3: Update current state with hot upgrade info
-      update_current_state_with_hot_upgrade(url, app, image_ref)
+      update_current_state_with_hot_upgrade(url, app, image_ref, version, bucket)
 
       # step 4: Trigger reload on all machines
-      results = trigger_machine_reloads(url, app)
+      results = trigger_machine_reloads(url, app, max_concurrency, timeout)
 
       duration = System.monotonic_time(:millisecond) - start_time
 
       print_summary(results, tarball_info, duration)
     after
       # always release the lock, even if deployment fails
-      release_lock(app)
+      release_lock(app, bucket)
     end
   end
 
@@ -49,10 +58,63 @@ defmodule FlyDeploy.Orchestrator do
     System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
   end
 
-  defp acquire_lock(app, deployment_id) do
+  defp ensure_bucket_exists(bucket) do
+    IO.puts(ansi([:yellow], "--> Ensuring S3 bucket exists"))
+
+    url = "#{s3_endpoint()}/#{bucket}"
+
+    aws_opts = [
+      access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
+      secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+      service: "s3",
+      region: "auto"
+    ]
+
+    # Try a HEAD request to check if bucket exists
+    case Req.head(url,
+           receive_timeout: 10_000,
+           connect_options: [timeout: 10_000],
+           aws_sigv4: aws_opts
+         ) do
+      {:ok, %{status: 200}} ->
+        IO.puts(ansi([:green], "    ✓ Bucket exists"))
+        :ok
+
+      {:ok, %{status: 404}} ->
+        # Bucket doesn't exist, create it
+        IO.puts(ansi([:white], "    Bucket not found, creating..."))
+
+        case Req.put(url,
+               receive_timeout: 10_000,
+               connect_options: [timeout: 10_000],
+               aws_sigv4: aws_opts
+             ) do
+          {:ok, %{status: status}} when status in 200..299 ->
+            IO.puts(ansi([:green], "    ✓ Bucket created"))
+            :ok
+
+          {:ok, %{status: status}} ->
+            IO.puts(ansi([:red], "    ✗ Failed to create bucket (HTTP #{status})"))
+            System.halt(1)
+
+          {:error, reason} ->
+            IO.puts(ansi([:red], "    ✗ Failed to create bucket: #{inspect(reason)}"))
+            System.halt(1)
+        end
+
+      {:ok, %{status: status}} ->
+        IO.puts(ansi([:yellow], "    ⚠ Unexpected status checking bucket: #{status}"))
+        :ok
+
+      {:error, reason} ->
+        IO.puts(ansi([:red], "    ✗ Failed to check bucket: #{inspect(reason)}"))
+        System.halt(1)
+    end
+  end
+
+  defp acquire_lock(app, deployment_id, bucket) do
     IO.puts(ansi([:yellow], "--> Acquiring deployment lock"))
 
-    bucket = System.get_env("AWS_BUCKET") || "#{app}-releases"
     object_key = "releases/#{app}-deploy.lock"
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
 
@@ -168,10 +230,9 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
-  defp release_lock(app) do
+  defp release_lock(app, bucket) do
     IO.puts(ansi([:yellow], "--> Releasing deployment lock"))
 
-    bucket = System.get_env("AWS_BUCKET") || "#{app}-releases"
     object_key = "releases/#{app}-deploy.lock"
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
 
@@ -243,11 +304,9 @@ defmodule FlyDeploy.Orchestrator do
     {tarball_path, %{modules: length(beam_files), size_bytes: tarball_size}}
   end
 
-  defp upload_to_tigris(tarball_path, app) do
+  defp upload_to_tigris(tarball_path, app, version, bucket) do
     IO.puts(ansi([:yellow], "--> Uploading to S3"))
 
-    version = Application.spec(app, :vsn) |> to_string()
-    bucket = System.get_env("AWS_BUCKET") || "#{app}-releases"
     object_key = "releases/#{app}-#{version}.tar.gz"
 
     content = File.read!(tarball_path)
@@ -276,11 +335,9 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
-  defp update_current_state_with_hot_upgrade(tarball_url, app, source_image_ref) do
+  defp update_current_state_with_hot_upgrade(tarball_url, app, source_image_ref, version, bucket) do
     IO.puts(ansi([:yellow], "--> Updating deployment metadata"))
 
-    version = Application.spec(app, :vsn) |> to_string()
-    bucket = System.get_env("AWS_BUCKET") || "#{app}-releases"
     object_key = "releases/#{app}-current.json"
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
 
@@ -349,7 +406,7 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
-  defp trigger_machine_reloads(tarball_url, app) do
+  defp trigger_machine_reloads(tarball_url, app, max_concurrency, timeout) do
     IO.puts(ansi([:yellow], "--> Upgrading machines"))
 
     # get machines from Fly API
@@ -377,8 +434,8 @@ defmodule FlyDeploy.Orchestrator do
         fn machine ->
           reload_machine(machine["id"], machine["region"], tarball_url, app)
         end,
-        timeout: 60_000,
-        max_concurrency: 20
+        timeout: timeout,
+        max_concurrency: max_concurrency
       )
       |> Enum.map(fn {:ok, result} -> result end)
 

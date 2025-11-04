@@ -10,7 +10,6 @@ defmodule FlyDeploy.Config do
   ## Configuration Options
 
   - `:otp_app` - OTP application name (default: auto-detected from mix.exs)
-  - `:supervisor` - Root supervisor module (default: inferred from otp_app)
   - `:binary_name` - Release binary name (default: same as otp_app)
   - `:bucket` - S3/Tigris bucket name (default: app-name or "releases")
   - `:fly_config` - Path to fly.toml (default: "fly.toml")
@@ -24,7 +23,6 @@ defmodule FlyDeploy.Config do
 
       config :fly_deploy,
         otp_app: :my_app,
-        supervisor: MyApp.Supervisor,
         bucket: "my-releases",
         env: %{
           "AWS_ENDPOINT_URL_S3" => "https://fly.storage.tigris.dev",
@@ -57,28 +55,24 @@ defmodule FlyDeploy.Config do
 
   defstruct [
     :otp_app,
-    :supervisor,
     :binary_name,
     :bucket,
     :fly_config,
     :env,
     :max_concurrency,
     :timeout,
-    :version,
-    :module_prefix
+    :version
   ]
 
   @type t :: %__MODULE__{
           otp_app: atom(),
-          supervisor: module(),
           binary_name: String.t(),
           bucket: String.t(),
           fly_config: String.t(),
           env: %{String.t() => String.t()},
           max_concurrency: pos_integer(),
           timeout: pos_integer(),
-          version: String.t(),
-          module_prefix: String.t()
+          version: String.t()
         }
 
   @doc """
@@ -89,7 +83,6 @@ defmodule FlyDeploy.Config do
       iex> FlyDeploy.Config.build([config: "fly-staging.toml"])
       %FlyDeploy.Config{
         otp_app: :my_app,
-        supervisor: MyApp.Supervisor,
         fly_config: "fly-staging.toml",
         ...
       }
@@ -126,19 +119,16 @@ defmodule FlyDeploy.Config do
 
   defp smart_defaults do
     otp_app = get_otp_app()
-    module_prefix = get_module_prefix(otp_app)
 
     %{
       otp_app: otp_app,
-      supervisor: get_supervisor(module_prefix),
       binary_name: Atom.to_string(otp_app),
       bucket: "releases",
       fly_config: "fly.toml",
       env: %{},
       max_concurrency: 20,
       timeout: 60_000,
-      version: get_app_version(otp_app),
-      module_prefix: module_prefix
+      version: get_app_version(otp_app)
     }
   end
 
@@ -148,18 +138,6 @@ defmodule FlyDeploy.Config do
 
   defp get_app_version(app) do
     Mix.Project.config()[:version] || Application.spec(app, :vsn) |> to_string() || "0.0.0"
-  end
-
-  defp get_module_prefix(app) do
-    # convention: :my_app -> "MyApp"
-    app
-    |> Atom.to_string()
-    |> Macro.camelize()
-  end
-
-  defp get_supervisor(module_prefix) do
-    # convention: MyApp -> MyApp.Supervisor
-    Module.concat([module_prefix, "Supervisor"])
   end
 
   defp get_mix_config do

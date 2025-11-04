@@ -371,11 +371,11 @@ defmodule FlyDeploy do
     Logger.info("[FlyDeploy] ✅ Hot upgrade applied successfully")
     :ok
   rescue
-    err ->
+    e ->
       Logger.error(
         "[FlyDeploy] Failed to apply startup hot upgrade: #{Exception.format(:error, e, __STACKTRACE__)}"
       )
 
-      {:error, err}
+      {:error, e}
   end
 end
