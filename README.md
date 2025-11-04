@@ -1,4 +1,4 @@
-# FlyDeploy
+# `mix fly_deploy.hot`
 
 Hot code upgrades for Elixir applications running on [Fly.io](https://fly.io) without restarts or downtime.
 
