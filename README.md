@@ -269,10 +269,10 @@ mix fly_deploy.hot --skip-build --image registry.fly.io/my-app:deployment-123
 
 FlyDeploy uses a 4-phase upgrade cycle to safely upgrade running processes:
 
-1. **Phase 1: Suspend ALL processes** - All affected processes are suspended with `:sys.suspend/1` before any code loading
-2. **Phase 2: Load ALL new code** - New code is loaded globally using `:code.purge/1` and `:code.load_file/1` while processes are safely suspended
-3. **Phase 3: Upgrade ALL processes** - Each suspended process has `:sys.change_code/4` called to trigger its `code_change/3` callback
-4. **Phase 4: Resume ALL processes** - All processes are resumed with `:sys.resume/1`
+1. **Phase 1: Suspend all changed processes** - All affected processes are suspended with `:sys.suspend/1` before any code loading
+2. **Phase 2: Load all changed code** - New code is loaded globally using `:code.purge/1` and `:code.load_file/1` while processes are safely suspended
+3. **Phase 3: Upgrade all processes** - Each suspended process has `:sys.change_code/4` called to trigger its `code_change/3` callback
+4. **Phase 4: Resume all processes** - All processes are resumed with `:sys.resume/1`
 5. **Phase 5: Trigger LiveView reloads** (if applicable) - Phoenix LiveView pages automatically re-render with new code
 
 This 4-phase approach eliminates race conditions where one upgraded process calls another that still has old code.
