@@ -288,7 +288,7 @@ If you're using Phoenix LiveView, FlyDeploy automatically triggers re-renders af
 
 ## Rollback Strategy
 
-Hot upgrades are forward-only. Once new code is loaded into the BEAM VM, you cannot unload it. If a hot upgrade causes issues, perform a cold deploy to a known good version:
+Hot upgrades are forward-only. Once new code is loaded into the BEAM VM, `FlyDeploy` cannot roll it back. If a hot upgrade causes issues, perform a cold deploy to a known good version:
 
 ```bash
 fly deploy
