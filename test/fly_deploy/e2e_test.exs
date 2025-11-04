@@ -60,6 +60,10 @@ defmodule FlyDeploy.E2ETest do
   test "complete hot upgrade cycle with startup reapply", %{app_url: app_url} do
     IO.puts("\n=== Starting E2E Hot Upgrade Test ===\n")
 
+    # Scale down to 1 machine to avoid load balancing issues with in-memory counter state
+    System.cmd("fly", ["scale", "count", "1", "-a", @app_name], cd: @test_app_dir)
+    Process.sleep(3000)
+
     # Step 1: Deploy initial version (v1)
     IO.puts("Step 1: Deploying initial version (v1)...")
     ensure_health_controller_version("v1")
@@ -331,7 +335,7 @@ defmodule FlyDeploy.E2ETest do
     counter_url = "#{app_url}/api/counter/increment"
 
     Enum.each(1..times, fn _ ->
-      Req.post!(counter_url, retry: :transient, max_retries: 3)
+      IO.inspect Req.post!(counter_url, retry: :transient, max_retries: 3)
     end)
   end
 

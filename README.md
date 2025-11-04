@@ -199,7 +199,6 @@ Required:
 - `FLY_IMAGE_REF` - Docker image reference (auto-set by Fly)
 
 Optional:
-- `AWS_BUCKET` - Override bucket name (defaults to `<app>-releases`)
 - `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://fly.storage.tigris.dev`)
 - `AWS_REGION` - AWS region (defaults to `auto` for Tigris)
 
@@ -211,7 +210,6 @@ Environment variables from your `[env]` section are automatically passed to the 
 [env]
   AWS_ENDPOINT_URL_S3 = "https://fly.storage.tigris.dev"
   AWS_REGION = "auto"
-  AWS_BUCKET = "my-app-staging"
 ```
 
 ### Mix Configuration
@@ -220,19 +218,24 @@ In `config/config.exs`:
 
 ```elixir
 config :fly_deploy,
-  bucket: "my-releases",
+  bucket: "my-custom-bucket",  # Optional - defaults to BUCKET_NAME env var
   max_concurrency: 10,
   env: %{
     "CUSTOM_VAR" => "value"
   }
 ```
 
+**Bucket Configuration**: FlyDeploy looks up the S3 bucket name from:
+1. Mix config (`:bucket` key above) - if explicitly configured
+2. `BUCKET_NAME` environment variable - automatically set by `fly storage create`
+
+If neither is configured, deployment will fail. When you run `fly storage create`, the `BUCKET_NAME` env var is automatically set on all your machines, so no additional configuration is needed.
+
 ## CLI Options
 
 The `mix fly_deploy.hot` task supports several options:
 
 - `--config` - Path to fly.toml file (default: "fly.toml")
-- `--bucket` - Override S3 bucket name
 - `--skip-build` - Skip building and use existing image (requires `--image`)
 - `--image` - Use specific pre-built image
 - `--dry-run` - Show what would be done without executing

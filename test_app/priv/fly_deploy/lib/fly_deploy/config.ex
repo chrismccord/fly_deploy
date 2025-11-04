@@ -1,5 +1,6 @@
 defmodule FlyDeploy.Config do
-  @moduledoc """
+  @moduledoc false
+  _archdoc = """
   Configuration builder for hot code upgrades.
 
   Merges configuration from multiple sources with the following priority:
@@ -9,9 +10,8 @@ defmodule FlyDeploy.Config do
   ## Configuration Options
 
   - `:otp_app` - OTP application name (default: auto-detected from mix.exs)
-  - `:supervisor` - Root supervisor module (default: inferred from otp_app)
   - `:binary_name` - Release binary name (default: same as otp_app)
-  - `:bucket` - S3/Tigris bucket name (default: app-name or "releases")
+  - `:bucket` - S3/Tigris bucket name (looked up from Mix config or BUCKET_NAME env var)
   - `:fly_config` - Path to fly.toml (default: "fly.toml")
   - `:env` - Additional environment variables to pass to orchestrator machine
   - `:max_concurrency` - Max concurrent machine upgrades (default: 20)
@@ -22,24 +22,25 @@ defmodule FlyDeploy.Config do
   In `config/config.exs`:
 
       config :fly_deploy,
-        otp_app: :my_app,
-        supervisor: MyApp.Supervisor,
-        bucket: "my-releases",
+        bucket: "my-releases",  # Optional - defaults to BUCKET_NAME env var
         env: %{
           "AWS_ENDPOINT_URL_S3" => "https://fly.storage.tigris.dev",
           "AWS_REGION" => "auto"
         }
 
+  ## Bucket Configuration
+
+  The S3 bucket is discovered from:
+  1. Mix config `:bucket` key (if explicitly set)
+  2. `BUCKET_NAME` environment variable (automatically set by `fly storage create`)
+
   ## CLI Usage
 
-      # Use defaults
+      # Use defaults (bucket from Mix config or BUCKET_NAME env var)
       mix fly_deploy.hot
 
       # Override fly config path
       mix fly_deploy.hot --config fly-staging.toml
-
-      # Override specific settings
-      mix fly_deploy.hot --bucket my-bucket
 
   ## fly.toml [env] Section
 
@@ -49,35 +50,30 @@ defmodule FlyDeploy.Config do
       [env]
         AWS_ENDPOINT_URL_S3 = "https://fly.storage.tigris.dev"
         AWS_REGION = "auto"
-        AWS_BUCKET = "my-app-staging"
 
   Additional env vars can be added via Mix config using the `:env` key.
   """
 
   defstruct [
     :otp_app,
-    :supervisor,
     :binary_name,
     :bucket,
     :fly_config,
     :env,
     :max_concurrency,
     :timeout,
-    :version,
-    :module_prefix
+    :version
   ]
 
   @type t :: %__MODULE__{
           otp_app: atom(),
-          supervisor: module(),
           binary_name: String.t(),
           bucket: String.t(),
           fly_config: String.t(),
           env: %{String.t() => String.t()},
           max_concurrency: pos_integer(),
           timeout: pos_integer(),
-          version: String.t(),
-          module_prefix: String.t()
+          version: String.t()
         }
 
   @doc """
@@ -88,19 +84,13 @@ defmodule FlyDeploy.Config do
       iex> FlyDeploy.Config.build([config: "fly-staging.toml"])
       %FlyDeploy.Config{
         otp_app: :my_app,
-        supervisor: MyApp.Supervisor,
         fly_config: "fly-staging.toml",
         ...
       }
   """
   def build(cli_opts \\ []) do
-    # 1. Start with smart defaults
     defaults = smart_defaults()
-
-    # 2. Load from Mix config
     mix_config = get_mix_config()
-
-    # 3. Parse fly.toml
     fly_config_path = cli_opts[:config] || mix_config[:fly_config] || "fly.toml"
 
     fly_config =
@@ -110,7 +100,7 @@ defmodule FlyDeploy.Config do
         %{}
       end
 
-    # 4. Merge: defaults < mix config < fly.toml < cli options
+    # merge: defaults < mix config < fly.toml < cli options
     merged =
       defaults
       |> Map.merge(map_from_keyword(mix_config))
@@ -128,23 +118,18 @@ defmodule FlyDeploy.Config do
     Application.spec(app, :vsn) |> to_string()
   end
 
-  # Private functions
-
   defp smart_defaults do
     otp_app = get_otp_app()
-    module_prefix = get_module_prefix(otp_app)
 
     %{
       otp_app: otp_app,
-      supervisor: get_supervisor(module_prefix),
       binary_name: Atom.to_string(otp_app),
-      bucket: "releases",
+      bucket: nil,  # Will be read from BUCKET_NAME env var on Fly machines
       fly_config: "fly.toml",
       env: %{},
       max_concurrency: 20,
       timeout: 60_000,
-      version: get_app_version(otp_app),
-      module_prefix: module_prefix
+      version: get_app_version(otp_app)
     }
   end
 
@@ -156,18 +141,6 @@ defmodule FlyDeploy.Config do
     Mix.Project.config()[:version] || Application.spec(app, :vsn) |> to_string() || "0.0.0"
   end
 
-  defp get_module_prefix(app) do
-    # Convention: :my_app -> "MyApp"
-    app
-    |> Atom.to_string()
-    |> Macro.camelize()
-  end
-
-  defp get_supervisor(module_prefix) do
-    # Convention: MyApp -> MyApp.Supervisor
-    Module.concat([module_prefix, "Supervisor"])
-  end
-
   defp get_mix_config do
     Application.get_all_env(:fly_deploy)
   end
@@ -177,32 +150,18 @@ defmodule FlyDeploy.Config do
   end
 
   defp merge_fly_config(config, fly_config) do
-    # Merge env vars from fly.toml into existing env
     env = Map.merge(config.env || %{}, fly_config[:env] || %{})
 
-    # Use bucket name from fly.toml app name if available
-    bucket =
-      if fly_config[:app_name] do
-        fly_config.app_name
-      else
-        config.bucket
-      end
-
+    # Don't override bucket from fly.toml - it should stay as OTP app based default
     config
     |> Map.put(:env, env)
-    |> Map.put(:bucket, bucket)
   end
 
   defp apply_cli_opts(config, cli_opts) do
-    # Apply CLI overrides
-    cli_opts
-    |> Enum.reduce(config, fn
+    Enum.reduce(cli_opts, config, fn
       {:config, _path}, acc ->
         # Already handled above
         acc
-
-      {:bucket, bucket}, acc ->
-        Map.put(acc, :bucket, bucket)
 
       {:timeout, timeout}, acc ->
         Map.put(acc, :timeout, timeout)

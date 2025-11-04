@@ -42,7 +42,6 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
   ## CLI Options
 
     * `--config` - Path to fly.toml file (default: "fly.toml")
-    * `--bucket` - Override S3/Tigris bucket name
     * `--skip-build` - Skip building and use existing image (requires --image)
     * `--image` - Use specific pre-built image
     * `--dry-run` - Show what would be done without executing
@@ -87,7 +86,6 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
       OptionParser.parse(args,
         strict: [
           config: :string,
-          bucket: :string,
           skip_build: :boolean,
           dry_run: :boolean,
           image: :string,
@@ -244,8 +242,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         ["-e", "DEPLOY_LOCKED_BY=#{locked_by}"],
         ["-e", "DEPLOY_VERSION=#{config.version}"],
         ["-e", "DEPLOY_MAX_CONCURRENCY=#{config.max_concurrency}"],
-        ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"],
-        ["-e", "DEPLOY_BUCKET=#{config.bucket}"]
+        ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"]
       ] ++
         if opts[:force] do
           [["-e", "DEPLOY_FORCE=true"]]

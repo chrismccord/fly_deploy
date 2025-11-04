@@ -11,7 +11,7 @@ defmodule FlyDeploy.Config do
 
   - `:otp_app` - OTP application name (default: auto-detected from mix.exs)
   - `:binary_name` - Release binary name (default: same as otp_app)
-  - `:bucket` - S3/Tigris bucket name (default: app-name or "releases")
+  - `:bucket` - S3/Tigris bucket name (looked up from Mix config or BUCKET_NAME env var)
   - `:fly_config` - Path to fly.toml (default: "fly.toml")
   - `:env` - Additional environment variables to pass to orchestrator machine
   - `:max_concurrency` - Max concurrent machine upgrades (default: 20)
@@ -22,23 +22,25 @@ defmodule FlyDeploy.Config do
   In `config/config.exs`:
 
       config :fly_deploy,
-        otp_app: :my_app,
-        bucket: "my-releases",
+        bucket: "my-releases",  # Optional - defaults to BUCKET_NAME env var
         env: %{
           "AWS_ENDPOINT_URL_S3" => "https://fly.storage.tigris.dev",
           "AWS_REGION" => "auto"
         }
 
+  ## Bucket Configuration
+
+  The S3 bucket is discovered from:
+  1. Mix config `:bucket` key (if explicitly set)
+  2. `BUCKET_NAME` environment variable (automatically set by `fly storage create`)
+
   ## CLI Usage
 
-      # Use defaults
+      # Use defaults (bucket from Mix config or BUCKET_NAME env var)
       mix fly_deploy.hot
 
       # Override fly config path
       mix fly_deploy.hot --config fly-staging.toml
-
-      # Override specific settings
-      mix fly_deploy.hot --bucket my-bucket
 
   ## fly.toml [env] Section
 
@@ -48,7 +50,6 @@ defmodule FlyDeploy.Config do
       [env]
         AWS_ENDPOINT_URL_S3 = "https://fly.storage.tigris.dev"
         AWS_REGION = "auto"
-        AWS_BUCKET = "my-app-staging"
 
   Additional env vars can be added via Mix config using the `:env` key.
   """
@@ -123,7 +124,7 @@ defmodule FlyDeploy.Config do
     %{
       otp_app: otp_app,
       binary_name: Atom.to_string(otp_app),
-      bucket: "releases",
+      bucket: nil,  # Will be read from BUCKET_NAME env var on Fly machines
       fly_config: "fly.toml",
       env: %{},
       max_concurrency: 20,
@@ -151,17 +152,9 @@ defmodule FlyDeploy.Config do
   defp merge_fly_config(config, fly_config) do
     env = Map.merge(config.env || %{}, fly_config[:env] || %{})
 
-    # use bucket name from fly.toml app name if available
-    bucket =
-      if fly_config[:app_name] do
-        fly_config.app_name
-      else
-        config.bucket
-      end
-
+    # Don't override bucket from fly.toml - it should stay as OTP app based default
     config
     |> Map.put(:env, env)
-    |> Map.put(:bucket, bucket)
   end
 
   defp apply_cli_opts(config, cli_opts) do
@@ -169,9 +162,6 @@ defmodule FlyDeploy.Config do
       {:config, _path}, acc ->
         # Already handled above
         acc
-
-      {:bucket, bucket}, acc ->
-        Map.put(acc, :bucket, bucket)
 
       {:timeout, timeout}, acc ->
         Map.put(acc, :timeout, timeout)

@@ -9,21 +9,27 @@ defmodule FlyDeploy.Orchestrator do
     {:ok, _} = Application.ensure_all_started(:req)
     {:ok, _} = Application.ensure_all_started(:finch)
 
-    # get OTP app and image_ref from opts (passed from Mix task)
+    # get required args from opts (passed from Mix task via eval command)
     app = Keyword.fetch!(opts, :app)
     image_ref = Keyword.fetch!(opts, :image_ref)
 
-    # get config values from environment variables
+    # Look up bucket from Application env (set via Mix config) or BUCKET_NAME env var
+    bucket = Application.get_env(:fly_deploy, :bucket) || System.get_env("BUCKET_NAME")
+
+    if is_nil(bucket) do
+      IO.puts(ansi([:red], "✗ No bucket configured!"))
+      IO.puts("")
+      IO.puts("Set bucket in Mix config or ensure BUCKET_NAME env var is set via `fly storage create`")
+      System.halt(1)
+    end
+
+    # get config values from environment variables (passed from Mix task)
     version = System.get_env("DEPLOY_VERSION")
     max_concurrency = String.to_integer(System.get_env("DEPLOY_MAX_CONCURRENCY", "20"))
     timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", "60000"))
-    bucket = System.get_env("DEPLOY_BUCKET") || System.get_env("AWS_BUCKET") || "#{app}-releases"
 
     # track start time
     start_time = System.monotonic_time(:millisecond)
-
-    # ensure S3 bucket exists
-    ensure_bucket_exists(bucket)
 
     # try to acquire deployment lock
     try do
@@ -58,60 +64,6 @@ defmodule FlyDeploy.Orchestrator do
     System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
   end
 
-  defp ensure_bucket_exists(bucket) do
-    IO.puts(ansi([:yellow], "--> Ensuring S3 bucket exists"))
-
-    url = "#{s3_endpoint()}/#{bucket}"
-
-    aws_opts = [
-      access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-      secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
-      service: "s3",
-      region: "auto"
-    ]
-
-    # Try a HEAD request to check if bucket exists
-    case Req.head(url,
-           receive_timeout: 10_000,
-           connect_options: [timeout: 10_000],
-           aws_sigv4: aws_opts
-         ) do
-      {:ok, %{status: 200}} ->
-        IO.puts(ansi([:green], "    ✓ Bucket exists"))
-        :ok
-
-      {:ok, %{status: 404}} ->
-        # Bucket doesn't exist, create it
-        IO.puts(ansi([:white], "    Bucket not found, creating..."))
-
-        case Req.put(url,
-               receive_timeout: 10_000,
-               connect_options: [timeout: 10_000],
-               aws_sigv4: aws_opts
-             ) do
-          {:ok, %{status: status}} when status in 200..299 ->
-            IO.puts(ansi([:green], "    ✓ Bucket created"))
-            :ok
-
-          {:ok, %{status: status}} ->
-            IO.puts(ansi([:red], "    ✗ Failed to create bucket (HTTP #{status})"))
-            System.halt(1)
-
-          {:error, reason} ->
-            IO.puts(ansi([:red], "    ✗ Failed to create bucket: #{inspect(reason)}"))
-            System.halt(1)
-        end
-
-      {:ok, %{status: status}} ->
-        IO.puts(ansi([:yellow], "    ⚠ Unexpected status checking bucket: #{status}"))
-        :ok
-
-      {:error, reason} ->
-        IO.puts(ansi([:red], "    ✗ Failed to check bucket: #{inspect(reason)}"))
-        System.halt(1)
-    end
-  end
-
   defp acquire_lock(app, deployment_id, bucket) do
     IO.puts(ansi([:yellow], "--> Acquiring deployment lock"))
 
@@ -142,6 +94,11 @@ defmodule FlyDeploy.Orchestrator do
       {:ok, %{status: 404}} ->
         # no lock exists - create it
         create_lock(url, aws_opts, locked_by, deployment_id, lock_timeout)
+
+      {:ok, %{status: 403}} ->
+        # bucket likely doesn't exist or permission issue
+        IO.puts(ansi([:red], "    ✗ Access denied checking lock (bucket may not exist)"))
+        System.halt(1)
 
       {:error, reason} ->
         IO.puts(ansi([:red], "    ✗ Failed to check lock status: #{inspect(reason)}"))
@@ -439,12 +396,16 @@ defmodule FlyDeploy.Orchestrator do
       )
       |> Enum.map(fn {:ok, result} -> result end)
 
-    # filter to only app modules before returning
+    # filter to only app modules for successful results
     results
     |> Enum.map(fn result ->
-      Map.update!(result, :module_names, fn modules ->
-        filter_app_modules(modules, app)
-      end)
+      if result.success do
+        Map.update!(result, :module_names, fn modules ->
+          filter_app_modules(modules, app)
+        end)
+      else
+        result
+      end
     end)
   end
 

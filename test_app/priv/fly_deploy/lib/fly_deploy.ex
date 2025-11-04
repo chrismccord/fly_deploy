@@ -55,7 +55,6 @@ defmodule FlyDeploy do
   - `FLY_APP_NAME` - Application name (auto-set by Fly)
 
   Optional:
-  - `AWS_BUCKET` - Override default bucket name (defaults to `<app>-releases`)
   - `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://fly.storage.tigris.dev`)
   - `AWS_REGION` - AWS region (defaults to `auto` for Tigris)
 
@@ -153,6 +152,7 @@ defmodule FlyDeploy do
   @doc """
   Reapplies the current hot upgrade on application startup.
 
+  Detects new cold deploys and resets state automatically.
   This should be called early in `Application.start/2`, after HTTP clients
   are available but before starting the main supervision tree. It checks S3
   for pending hot upgrades matching the current Docker image and reapplies
@@ -169,11 +169,6 @@ defmodule FlyDeploy do
         # ... start supervision tree
       end
 
-  ## Safety
-
-  - Non-blocking - Won't prevent app from starting if check fails
-  - Graceful degradation - Logs errors but doesn't crash
-  - Detects new cold deploys and resets state automatically
   """
   def startup_reapply_current(app) do
     my_image_ref = System.get_env("FLY_IMAGE_REF")
@@ -218,6 +213,8 @@ defmodule FlyDeploy do
 
   - `:app` - The OTP application name (required)
   - `:image_ref` - The Docker image reference for this deployment (required)
+
+  Bucket is discovered from Application config or `BUCKET_NAME` environment variable.
 
   ## Example
 
@@ -272,8 +269,6 @@ defmodule FlyDeploy do
     FlyDeploy.ReloadScript.hot_upgrade(tarball_url, app)
   end
 
-  # Private helper functions for startup_reapply_current
-
   defp s3_endpoint do
     System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
   end
@@ -302,30 +297,36 @@ defmodule FlyDeploy do
   end
 
   defp fetch_current_state(app) do
-    bucket = System.get_env("AWS_BUCKET") || "#{app}-releases"
-    url = "#{s3_endpoint()}/#{bucket}/releases/#{app}-current.json"
+    # Look up bucket from Application env (set via Mix config) or BUCKET_NAME env var
+    bucket = Application.get_env(:fly_deploy, :bucket) || System.get_env("BUCKET_NAME")
 
-    case Req.get(url,
-           receive_timeout: 10_000,
-           connect_options: [timeout: 10_000],
-           aws_sigv4: [
-             access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-             secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
-             service: "s3",
-             region: "auto"
-           ]
-         ) do
-      {:ok, %{status: 200, body: body}} when is_map(body) ->
-        {:ok, body}
+    if is_nil(bucket) do
+      {:error, :no_bucket_configured}
+    else
+      url = "#{s3_endpoint()}/#{bucket}/releases/#{app}-current.json"
 
-      {:ok, %{status: 404}} ->
-        {:error, :not_found}
+      case Req.get(url,
+             receive_timeout: 10_000,
+             connect_options: [timeout: 10_000],
+             aws_sigv4: [
+               access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
+               secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+               service: "s3",
+               region: "auto"
+             ]
+           ) do
+        {:ok, %{status: 200, body: body}} when is_map(body) ->
+          {:ok, body}
 
-      {:ok, %{status: status}} ->
-        {:error, {:unexpected_status, status}}
+        {:ok, %{status: 404}} ->
+          {:error, :not_found}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:ok, %{status: status}} ->
+          {:error, {:gateway, status}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -340,7 +341,13 @@ defmodule FlyDeploy do
   end
 
   defp write_current_state(app, state) do
-    bucket = System.get_env("AWS_BUCKET") || "#{app}-releases"
+    # Look up bucket from Application env (set via Mix config) or BUCKET_NAME env var
+    bucket = Application.get_env(:fly_deploy, :bucket) || System.get_env("BUCKET_NAME")
+
+    if is_nil(bucket) do
+      raise "No bucket configured. Set bucket in Mix config or ensure BUCKET_NAME env var is set via `fly storage create`"
+    end
+
     url = "#{s3_endpoint()}/#{bucket}/releases/#{app}-current.json"
 
     case Req.put(url,
