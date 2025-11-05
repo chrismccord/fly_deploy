@@ -184,16 +184,22 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     IO.puts(IO.ANSI.format([:yellow, "--> Building Docker image"]))
 
     # Run fly deploy --build-only to create the image
-    {output, exit_code} =
-      System.cmd(
-        "fly",
-        ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config],
-        stderr_to_stdout: true
+    # Use Port to stream output in real-time while capturing it
+    port =
+      Port.open(
+        {:spawn_executable, System.find_executable("fly")},
+        [
+          :binary,
+          :exit_status,
+          :use_stdio,
+          :stderr_to_stdout,
+          args: ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
+        ]
       )
 
+    {output, exit_code} = receive_port_output(port, "", nil)
+
     if exit_code != 0 do
-      Mix.shell().error("Build failed:")
-      Mix.shell().error(output)
       Mix.raise("fly deploy --build-only failed")
     end
 
@@ -217,6 +223,39 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     Process.sleep(3000)
 
     image_ref
+  end
+
+  defp receive_port_output(port, acc, exit_code) do
+    receive do
+      {^port, {:data, data}} ->
+        IO.write(data)
+        receive_port_output(port, acc <> data, exit_code)
+
+      {^port, {:exit_status, status}} ->
+        # Continue receiving any remaining data after exit
+        receive_remaining_output(port, acc, status)
+    after
+      300_000 ->
+        Mix.raise("Build timeout after 5 minutes")
+    end
+  end
+
+  defp receive_remaining_output(port, acc, exit_code) do
+    receive do
+      {^port, {:data, data}} ->
+        IO.write(data)
+        receive_remaining_output(port, acc <> data, exit_code)
+    after
+      100 ->
+        # Port may already be closed, so use try/catch
+        try do
+          Port.close(port)
+        catch
+          :error, :badarg -> :ok
+        end
+
+        {acc, exit_code}
+    end
   end
 
   defp extract_deployment_id(image_ref) do

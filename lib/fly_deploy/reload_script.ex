@@ -95,6 +95,19 @@ defmodule FlyDeploy.ReloadScript do
     )
 
     IO.puts("✅ Hot reload complete!")
+
+    # Output JSON result for parsing by orchestrator
+    json_result = %{
+      success: result.processes_failed == 0,
+      modules_reloaded: result.modules_reloaded,
+      module_names: result.module_names,
+      processes_succeeded: result.processes_succeeded,
+      process_names: result.process_names,
+      processes_failed: result.processes_failed,
+      suspend_duration_ms: result.suspend_duration_ms
+    }
+
+    IO.puts("__FLY_DEPLOY_RESULT__#{JSON.encode!(json_result)}__FLY_DEPLOY_RESULT__")
   end
 
   @doc """
@@ -288,9 +301,26 @@ defmodule FlyDeploy.ReloadScript do
     succeeded = Enum.count(upgrade_results, fn {status, _, _} -> status == :ok end)
     failed = Enum.count(upgrade_results, fn {status, _, _} -> status == :error end)
 
+    # Extract module names (without "Elixir." prefix for cleaner output)
+    module_names =
+      Enum.map(changed_modules, fn mod ->
+        mod |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
+      end)
+
+    # Extract process module names (without "Elixir." prefix)
+    process_names =
+      upgrade_results
+      |> Enum.filter(fn {status, _, _} -> status == :ok end)
+      |> Enum.map(fn {:ok, _pid, module} ->
+        module |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
+      end)
+      |> Enum.uniq()
+
     stats = %{
       modules_reloaded: length(changed_modules),
+      module_names: module_names,
       processes_succeeded: succeeded,
+      process_names: process_names,
       processes_failed: failed,
       processes_skipped: length(suspended_processes) - length(successfully_suspended),
       suspend_duration_ms: suspend_duration_ms

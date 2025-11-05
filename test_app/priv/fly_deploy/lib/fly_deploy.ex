@@ -269,6 +269,71 @@ defmodule FlyDeploy do
     FlyDeploy.ReloadScript.hot_upgrade(tarball_url, app)
   end
 
+  @doc """
+  Gets current hot upgrade information for this machine.
+
+  Returns a map with the current deployment state, including whether a hot
+  upgrade has been applied and details about the upgrade.
+
+  This is typically called via RPC from `mix fly_deploy.status`.
+
+  ## Parameters
+
+  - `app` - The OTP application name (atom)
+
+  ## Returns
+
+  - `%{hot_upgrade_applied: false}` - No hot upgrade applied (running base image)
+  - `%{hot_upgrade_applied: true, version: "...", source_image_ref: "...", deployed_at: "..."}` - Hot upgrade applied
+
+  ## Example
+
+      # Via RPC
+      FlyDeploy.get_current_hot_upgrade_info(:my_app)
+      #=> %{
+      #     hot_upgrade_applied: true,
+      #     version: "0.1.1",
+      #     source_image_ref: "registry.fly.io/my-app:deployment-01K94R...",
+      #     deployed_at: "2024-01-15T10:30:00Z",
+      #     current_image_ref: "registry.fly.io/my-app:deployment-01K93Q..."
+      #   }
+  """
+  def get_current_hot_upgrade_info(app) do
+    my_image_ref = System.get_env("FLY_IMAGE_REF")
+
+    case fetch_current_state(app) do
+      {:ok, current} ->
+        # Get the image_ref from S3 state (the base image for this deployment generation)
+        base_image_ref = Map.get(current, "image_ref")
+
+        case Map.get(current, "hot_upgrade") do
+          nil ->
+            %{
+              hot_upgrade_applied: false,
+              current_image_ref: my_image_ref || "unknown",
+              base_image_ref: base_image_ref
+            }
+
+          upgrade ->
+            %{
+              hot_upgrade_applied: true,
+              version: upgrade["version"],
+              source_image_ref: upgrade["source_image_ref"],
+              deployed_at: upgrade["deployed_at"],
+              current_image_ref: my_image_ref || "unknown",
+              base_image_ref: base_image_ref
+            }
+        end
+
+      {:error, _reason} ->
+        %{
+          hot_upgrade_applied: false,
+          current_image_ref: my_image_ref || "unknown",
+          base_image_ref: nil
+        }
+    end
+  end
+
   defp s3_endpoint do
     System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
   end

@@ -388,6 +388,15 @@ defmodule FlyDeploy.Orchestrator do
       machines_response.body
       |> Enum.filter(&(&1["state"] == "started" && !(&1["config"]["services"] in [nil, []])))
 
+    # Show which machines we're upgrading
+    IO.puts("    Found #{length(machines)} machines:")
+    Enum.each(machines, fn machine ->
+      machine_id = String.slice(machine["id"], 0, 14)
+      region = machine["region"]
+      IO.puts("      • #{machine_id} (#{region})")
+    end)
+    IO.puts("")
+
     # reload each machine
     results =
       Task.async_stream(
@@ -484,61 +493,60 @@ defmodule FlyDeploy.Orchestrator do
   defp parse_machine_result(machine_id, region, body) do
     stdout = body["stdout"] || ""
 
-    # parse module names from log lines like "[info] [TestApp.FlyDeploy] Reloading module: Elixir.TestApp.Counter"
-    module_names =
-      Regex.scan(~r/Reloading module: Elixir\.([^\s\n]+)/, stdout)
-      |> Enum.map(fn [_, name] -> name end)
+    # Parse JSON result from output
+    # Look for __FLY_DEPLOY_RESULT__<json>__FLY_DEPLOY_RESULT__
+    result =
+      case Regex.run(~r/__FLY_DEPLOY_RESULT__(.+)__FLY_DEPLOY_RESULT__/s, stdout) do
+        [_, json_str] ->
+          case JSON.decode(json_str) do
+            {:ok, data} ->
+              %{
+                machine_id: machine_id,
+                region: region,
+                success: data["success"] && body["exit_code"] == 0,
+                modules: data["modules_reloaded"],
+                module_names: data["module_names"] || [],
+                processes_succeeded: data["processes_succeeded"],
+                process_names: data["process_names"] || [],
+                processes_failed: data["processes_failed"],
+                suspend_duration_ms: data["suspend_duration_ms"]
+              }
 
-    # parse process info from log lines like "[info] [TestApp.FlyDeploy] Upgraded process #PID<0.1311.0> (Elixir.TestApp.Counter)"
-    process_names =
-      Regex.scan(~r/Upgraded process #PID<[^>]+> \(Elixir\.([^\)]+)\)/, stdout)
-      |> Enum.map(fn [_, name] -> name end)
+            {:error, reason} ->
+              %{
+                machine_id: machine_id,
+                region: region,
+                success: false,
+                error: "Failed to decode JSON: #{inspect(reason)}"
+              }
+          end
 
-    processes_succeeded = length(process_names)
-
-    processes_failed =
-      case Regex.run(~r/(\d+) failed/, stdout) do
-        [_, count] -> String.to_integer(count)
-        _ -> 0
+        nil ->
+          %{
+            machine_id: machine_id,
+            region: region,
+            success: false,
+            error: "No JSON result found in output"
+          }
       end
-
-    # parse suspend duration from log line like "Processes were suspended for 1234ms"
-    suspend_duration_ms =
-      case Regex.run(~r/Processes were suspended for (\d+)ms/, stdout) do
-        [_, duration] -> String.to_integer(duration)
-        _ -> nil
-      end
-
-    success = body["exit_code"] == 0 && processes_failed == 0
-
-    result = %{
-      machine_id: machine_id,
-      region: region,
-      success: success,
-      modules: length(module_names),
-      module_names: module_names,
-      processes_succeeded: processes_succeeded,
-      process_names: process_names,
-      processes_failed: processes_failed,
-      suspend_duration_ms: suspend_duration_ms
-    }
 
     # print status for this machine
-    if success do
+    if result.success do
       suspend_info =
-        if suspend_duration_ms,
-          do: ", suspended #{suspend_duration_ms}ms",
+        if result.suspend_duration_ms,
+          do: ", suspended #{result.suspend_duration_ms}ms",
           else: ""
 
       IO.puts(
         ansi(
           [:green],
-          "    ✓ #{String.slice(machine_id, 0, 14)} (#{region}) - #{length(module_names)} modules, #{processes_succeeded} processes#{suspend_info}"
+          "    ✓ #{String.slice(machine_id, 0, 14)} (#{region}) - #{result.modules} modules, #{result.processes_succeeded} processes#{suspend_info}"
         )
       )
     else
+      error_msg = Map.get(result, :error, "Unknown error")
       IO.puts(ansi([:red], "    ✗ #{String.slice(machine_id, 0, 14)} (#{region}) - FAILED"))
-      IO.puts(ansi([:red], "      #{stdout}"))
+      IO.puts(ansi([:red], "      #{error_msg}"))
     end
 
     result

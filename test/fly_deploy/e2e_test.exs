@@ -95,6 +95,14 @@ defmodule FlyDeploy.E2ETest do
     deploy_hot()
     wait_for_deployment()
 
+    # Step 3a: Verify status shows hot upgrade applied
+    IO.puts("Step 3a: Checking fly_deploy.status after hot upgrade...")
+    {status_output, 0} = run_status_command()
+    assert String.contains?(status_output, "Hot Upgrade:")
+    assert String.contains?(status_output, "v0.1.0")
+    refute String.contains?(status_output, "Hot Upgrade: None")
+    IO.puts("✓ Status correctly shows hot upgrade applied\n")
+
     # Step 4: Verify counter state persisted, PID unchanged, and version updated
     IO.puts("Step 4: Verifying counter state after hot upgrade...")
     after_upgrade = get_health_check(app_url)
@@ -269,12 +277,14 @@ defmodule FlyDeploy.E2ETest do
   end
 
   defp deploy_cold do
-    IO.puts("  Running: fly deploy --remote-only -a #{@app_name} (inside #{@test_app_dir})")
+    IO.puts(
+      "  Running: fly deploy --remote-only --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
+    )
 
     {output, exit_code} =
       System.cmd(
         "fly",
-        ["deploy", "--remote-only", "-a", @app_name],
+        ["deploy", "--remote-only", "--smoke-checks=false", "-a", @app_name],
         cd: @test_app_dir,
         into: IO.stream()
       )
@@ -302,6 +312,17 @@ defmodule FlyDeploy.E2ETest do
     end
 
     output
+  end
+
+  defp run_status_command do
+    IO.puts("  Running: mix fly_deploy.status")
+
+    System.cmd(
+      "mix",
+      ["fly_deploy.status"],
+      cd: @test_app_dir,
+      stderr_to_stdout: true
+    )
   end
 
   defp restart_all_machines do
