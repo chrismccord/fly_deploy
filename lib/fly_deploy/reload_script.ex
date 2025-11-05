@@ -168,6 +168,7 @@ defmodule FlyDeploy.ReloadScript do
     Logger.info("[FlyDeploy.ReloadScript] Found #{length(processes)} processes to upgrade")
 
     # phase 1: Suspend ALL processes
+    suspend_start = System.monotonic_time(:millisecond)
     Logger.info("[FlyDeploy.ReloadScript] Phase 1: Suspending all processes...")
 
     suspended_processes =
@@ -237,6 +238,11 @@ defmodule FlyDeploy.ReloadScript do
       end
     end)
 
+    suspend_end = System.monotonic_time(:millisecond)
+    suspend_duration_ms = suspend_end - suspend_start
+
+    Logger.info("[FlyDeploy.ReloadScript] Processes were suspended for #{suspend_duration_ms}ms")
+
     # phase 5: Trigger LiveView reloads for upgraded LiveView modules (if any)
     trigger_liveview_reloads(changed_modules)
 
@@ -248,7 +254,8 @@ defmodule FlyDeploy.ReloadScript do
       modules_reloaded: length(changed_modules),
       processes_succeeded: succeeded,
       processes_failed: failed,
-      processes_skipped: length(suspended_processes) - length(successfully_suspended)
+      processes_skipped: length(suspended_processes) - length(successfully_suspended),
+      suspend_duration_ms: suspend_duration_ms
     }
 
     Logger.info("[FlyDeploy.ReloadScript] Upgrade complete: #{inspect(stats)}")

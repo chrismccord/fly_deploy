@@ -502,6 +502,13 @@ defmodule FlyDeploy.Orchestrator do
         _ -> 0
       end
 
+    # parse suspend duration from log line like "Processes were suspended for 1234ms"
+    suspend_duration_ms =
+      case Regex.run(~r/Processes were suspended for (\d+)ms/, stdout) do
+        [_, duration] -> String.to_integer(duration)
+        _ -> nil
+      end
+
     success = body["exit_code"] == 0 && processes_failed == 0
 
     result = %{
@@ -512,15 +519,21 @@ defmodule FlyDeploy.Orchestrator do
       module_names: module_names,
       processes_succeeded: processes_succeeded,
       process_names: process_names,
-      processes_failed: processes_failed
+      processes_failed: processes_failed,
+      suspend_duration_ms: suspend_duration_ms
     }
 
     # print status for this machine
     if success do
+      suspend_info =
+        if suspend_duration_ms,
+          do: ", suspended #{suspend_duration_ms}ms",
+          else: ""
+
       IO.puts(
         ansi(
           [:green],
-          "    ✓ #{String.slice(machine_id, 0, 14)} (#{region}) - #{length(module_names)} modules, #{processes_succeeded} processes"
+          "    ✓ #{String.slice(machine_id, 0, 14)} (#{region}) - #{length(module_names)} modules, #{processes_succeeded} processes#{suspend_info}"
         )
       )
     else

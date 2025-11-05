@@ -6,3 +6,6 @@
 
 ## 0.1.2 (2025-09-04)
 - Fix LiveView process lookup, which was failing to send :phoenix_live_reload message, require a hard refresh to pick up upgraded changes to LiveViews
+
+## 0.1.3 (2025-09-04)
+- Instrument and log suspension time

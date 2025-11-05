@@ -168,6 +168,7 @@ defmodule FlyDeploy.ReloadScript do
     Logger.info("[FlyDeploy.ReloadScript] Found #{length(processes)} processes to upgrade")
 
     # phase 1: Suspend ALL processes
+    suspend_start = System.monotonic_time(:millisecond)
     Logger.info("[FlyDeploy.ReloadScript] Phase 1: Suspending all processes...")
 
     suspended_processes =
@@ -237,6 +238,13 @@ defmodule FlyDeploy.ReloadScript do
       end
     end)
 
+    suspend_end = System.monotonic_time(:millisecond)
+    suspend_duration_ms = suspend_end - suspend_start
+
+    Logger.info(
+      "[FlyDeploy.ReloadScript] Processes were suspended for #{suspend_duration_ms}ms"
+    )
+
     # phase 5: Trigger LiveView reloads for upgraded LiveView modules (if any)
     trigger_liveview_reloads(changed_modules)
 
@@ -248,7 +256,8 @@ defmodule FlyDeploy.ReloadScript do
       modules_reloaded: length(changed_modules),
       processes_succeeded: succeeded,
       processes_failed: failed,
-      processes_skipped: length(suspended_processes) - length(successfully_suspended)
+      processes_skipped: length(suspended_processes) - length(successfully_suspended),
+      suspend_duration_ms: suspend_duration_ms
     }
 
     Logger.info("[FlyDeploy.ReloadScript] Upgrade complete: #{inspect(stats)}")
@@ -312,13 +321,13 @@ defmodule FlyDeploy.ReloadScript do
 
   defp find_liveview_processes do
     # find all processes running Phoenix.LiveView
+    # LiveView processes have a $process_label key in their dictionary
+    # with format: {Phoenix.LiveView, ModuleName, "lv:phx-..."}
     Process.list()
     |> Enum.filter(fn pid ->
       case Process.info(pid, [:dictionary]) do
         [dictionary: dict] ->
-          # liveView processes have specific keys in their dictionary
-          Keyword.has_key?(dict, :"$initial_call") and
-            match?({Phoenix.LiveView.Channel, _, _}, Keyword.get(dict, :"$initial_call"))
+          match?({Phoenix.LiveView, _, _}, Keyword.get(dict, :"$process_label"))
 
         _ ->
           false
