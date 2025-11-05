@@ -19,3 +19,6 @@ that changed and precomputing changes
 
 ## 0.1.6 (2025-09-05)
 - Add `mix fly_deploy.status`
+
+## 0.1.7 (2025-09-05)
+- Fix `mix fly_depoy.status` failing when more than one machine exists

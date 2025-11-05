@@ -113,6 +113,7 @@ defmodule Mix.Tasks.FlyDeploy.Status do
 
   defp show_machine_status(machine, app_name) do
     machine_id = String.slice(machine["id"], 0, 14)
+    full_machine_id = machine["id"]
     region = machine["region"]
     state = machine["state"]
     image_ref = machine["config"]["image"]
@@ -140,7 +141,7 @@ defmodule Mix.Tasks.FlyDeploy.Status do
     # Only try to get hot upgrade info if machine is started
     # (can't RPC into stopped machines)
     if state == "started" do
-      case get_hot_upgrade_info(app_name) do
+      case get_hot_upgrade_info(app_name, full_machine_id) do
         {:ok, info} ->
           if info.hot_upgrade_applied do
             IO.puts(
@@ -192,7 +193,7 @@ defmodule Mix.Tasks.FlyDeploy.Status do
     IO.puts("")
   end
 
-  defp get_hot_upgrade_info(app_name) do
+  defp get_hot_upgrade_info(app_name, machine_id) do
     # Use fly ssh console to RPC into the machine and get hot upgrade status
     # Pass the OTP app name to the RPC call and encode as JSON
     otp_app = get_otp_app_name()
@@ -207,7 +208,8 @@ defmodule Mix.Tasks.FlyDeploy.Status do
              "console",
              "-a",
              app_name,
-             "-s",
+             "--machine",
+             machine_id,
              "-C",
              "/app/bin/#{get_binary_name()} rpc \"#{rpc_command}\""
            ],

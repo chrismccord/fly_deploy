@@ -65,14 +65,13 @@ defmodule Mix.Tasks.FlyDeploy.Status do
       IO.puts(IO.ANSI.format([:yellow, "No machines found"]))
       IO.puts("")
     else
-
-    # Filter to only app machines (not orchestrator machines)
-    # Include both started and stopped machines (app machines may have autostop)
-    app_machines =
-      Enum.filter(machines, fn m ->
-        m["state"] in ["started", "stopped"] && m["config"]["services"] != nil &&
-          m["config"]["services"] != []
-      end)
+      # Filter to only app machines (not orchestrator machines)
+      # Include both started and stopped machines (app machines may have autostop)
+      app_machines =
+        Enum.filter(machines, fn m ->
+          m["state"] in ["started", "stopped"] && m["config"]["services"] != nil &&
+            m["config"]["services"] != []
+        end)
 
       if Enum.empty?(app_machines) do
         IO.puts(IO.ANSI.format([:yellow, "No app machines found"]))
@@ -114,6 +113,7 @@ defmodule Mix.Tasks.FlyDeploy.Status do
 
   defp show_machine_status(machine, app_name) do
     machine_id = String.slice(machine["id"], 0, 14)
+    full_machine_id = machine["id"]
     region = machine["region"]
     state = machine["state"]
     image_ref = machine["config"]["image"]
@@ -141,44 +141,44 @@ defmodule Mix.Tasks.FlyDeploy.Status do
     # Only try to get hot upgrade info if machine is started
     # (can't RPC into stopped machines)
     if state == "started" do
-      case get_hot_upgrade_info(app_name) do
-      {:ok, info} ->
-        if info.hot_upgrade_applied do
-          IO.puts(
-            IO.ANSI.format([
-              :green,
-              "  Hot Upgrade: v#{info.version} (from #{info.source_deployment_id})"
-            ])
-          )
+      case get_hot_upgrade_info(app_name, full_machine_id) do
+        {:ok, info} ->
+          if info.hot_upgrade_applied do
+            IO.puts(
+              IO.ANSI.format([
+                :green,
+                "  Hot Upgrade: v#{info.version} (from #{info.source_deployment_id})"
+              ])
+            )
 
-          IO.puts("  Applied: #{info.deployed_at}")
+            IO.puts("  Applied: #{info.deployed_at}")
 
-          # Check if hot upgrade is stale by comparing machine's current image with S3 state's base image_ref
-          # If they match, hot upgrade is still valid. If not, a new cold deploy happened.
-          cond do
-            is_nil(info.base_image_ref) ->
-              IO.puts(
-                IO.ANSI.format([
-                  :yellow,
-                  "  Status: ⚠ Cannot determine if stale (no base image ref in state)"
-                ])
-              )
+            # Check if hot upgrade is stale by comparing machine's current image with S3 state's base image_ref
+            # If they match, hot upgrade is still valid. If not, a new cold deploy happened.
+            cond do
+              is_nil(info.base_image_ref) ->
+                IO.puts(
+                  IO.ANSI.format([
+                    :yellow,
+                    "  Status: ⚠ Cannot determine if stale (no base image ref in state)"
+                  ])
+                )
 
-            image_ref == info.base_image_ref ->
-              IO.puts(IO.ANSI.format([:green, "  Status: ✓ Hot upgrade is current"]))
+              image_ref == info.base_image_ref ->
+                IO.puts(IO.ANSI.format([:green, "  Status: ✓ Hot upgrade is current"]))
 
-            true ->
-              IO.puts(
-                IO.ANSI.format([
-                  :red,
-                  "  Status: ✗ Hot upgrade is STALE (new cold deploy detected)"
-                ])
-              )
+              true ->
+                IO.puts(
+                  IO.ANSI.format([
+                    :red,
+                    "  Status: ✗ Hot upgrade is STALE (new cold deploy detected)"
+                  ])
+                )
+            end
+          else
+            IO.puts(IO.ANSI.format([:faint, "  Hot Upgrade: None"]))
+            IO.puts(IO.ANSI.format([:green, "  Status: ✓ Running base image"]))
           end
-        else
-          IO.puts(IO.ANSI.format([:faint, "  Hot Upgrade: None"]))
-          IO.puts(IO.ANSI.format([:green, "  Status: ✓ Running base image"]))
-        end
 
         {:error, reason} ->
           IO.puts(IO.ANSI.format([:red, "  Hot Upgrade: Error - #{reason}"]))
@@ -193,11 +193,13 @@ defmodule Mix.Tasks.FlyDeploy.Status do
     IO.puts("")
   end
 
-  defp get_hot_upgrade_info(app_name) do
+  defp get_hot_upgrade_info(app_name, machine_id) do
     # Use fly ssh console to RPC into the machine and get hot upgrade status
     # Pass the OTP app name to the RPC call and encode as JSON
     otp_app = get_otp_app_name()
-    rpc_command = "result = FlyDeploy.get_current_hot_upgrade_info(:#{otp_app}); IO.puts(JSON.encode!(result))"
+
+    rpc_command =
+      "result = FlyDeploy.get_current_hot_upgrade_info(:#{otp_app}); IO.puts(JSON.encode!(result))"
 
     case System.cmd(
            "fly",
@@ -206,7 +208,8 @@ defmodule Mix.Tasks.FlyDeploy.Status do
              "console",
              "-a",
              app_name,
-             "-s",
+             "--machine",
+             machine_id,
              "-C",
              "/app/bin/#{get_binary_name()} rpc \"#{rpc_command}\""
            ],

@@ -185,16 +185,17 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it
-    port = Port.open(
-      {:spawn_executable, System.find_executable("fly")},
-      [
-        :binary,
-        :exit_status,
-        :use_stdio,
-        :stderr_to_stdout,
-        args: ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
-      ]
-    )
+    port =
+      Port.open(
+        {:spawn_executable, System.find_executable("fly")},
+        [
+          :binary,
+          :exit_status,
+          :use_stdio,
+          :stderr_to_stdout,
+          args: ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
+        ]
+      )
 
     {output, exit_code} = receive_port_output(port, "", nil)
 

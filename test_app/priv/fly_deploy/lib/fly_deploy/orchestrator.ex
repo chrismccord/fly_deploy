@@ -390,11 +390,13 @@ defmodule FlyDeploy.Orchestrator do
 
     # Show which machines we're upgrading
     IO.puts("    Found #{length(machines)} machines:")
+
     Enum.each(machines, fn machine ->
       machine_id = String.slice(machine["id"], 0, 14)
       region = machine["region"]
       IO.puts("      • #{machine_id} (#{region})")
     end)
+
     IO.puts("")
 
     # reload each machine
