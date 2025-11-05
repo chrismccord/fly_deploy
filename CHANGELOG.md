@@ -13,3 +13,6 @@
 ## 0.1.4 (2025-09-04)
 - Optimize suspension time by only copying parent OTP app files
 that changed and precomputing changes
+
+## 0.1.5 (2025-09-05)
+- Fully optimize suspension time when applying hot upgrade
