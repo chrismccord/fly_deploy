@@ -16,3 +16,6 @@ that changed and precomputing changes
 
 ## 0.1.5 (2025-09-05)
 - Fully optimize suspension time when applying hot upgrade
+
+## 0.1.6 (2025-09-05)
+- Add `mix fly_deploy.status`
