@@ -9,3 +9,7 @@
 
 ## 0.1.3 (2025-09-04)
 - Instrument and log suspension time
+
+## 0.1.4 (2025-09-04)
+- Optimize suspension time by only copying parent OTP app files
+that changed and precomputing changes
