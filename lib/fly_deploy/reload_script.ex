@@ -89,7 +89,7 @@ defmodule FlyDeploy.ReloadScript do
   1. Pre-loads all changed modules AFTER copying beam files
   2. Doesn't need to suspend/resume processes (they don't exist yet)
   """
-  def replay_upgrade_startup(tarball_url, _app) do
+  def replay_upgrade_startup(tarball_url, app) do
     IO.puts("Replaying hot upgrade from #{tarball_url} on startup...")
     {:ok, _} = Application.ensure_all_started(:req)
 
@@ -117,26 +117,69 @@ defmodule FlyDeploy.ReloadScript do
     File.mkdir_p!("/tmp/upgrade")
     :erl_tar.extract(~c"/tmp/upgrade.tar.gz", [:compressed, {:cwd, ~c"/tmp/upgrade"}])
 
-    # copy beam files to loaded paths
+    # copy beam files to loaded paths (only if MD5 differs)
+    # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
     IO.puts("Copying beam files to currently loaded paths...")
-    beam_files = Path.wildcard("/tmp/upgrade/lib/**/ebin/*.beam")
-    IO.puts("  Found #{length(beam_files)} beam files to copy")
+    all_beam_files = Path.wildcard("/tmp/upgrade/lib/**/ebin/*.beam")
 
-    Enum.each(beam_files, fn tarball_beam_path ->
-      beam_filename = Path.basename(tarball_beam_path)
-      module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
+    # Filter to only the OTP app's beam files
+    app_version_dir = Path.basename(Application.app_dir(app))
 
-      case :code.which(module_name) do
-        path when is_list(path) ->
-          loaded_path = List.to_string(path)
-          File.cp!(tarball_beam_path, loaded_path)
+    beam_files =
+      Enum.filter(all_beam_files, fn path ->
+        String.contains?(path, "/#{app_version_dir}/ebin/")
+      end)
 
-        _ ->
-          :ok
-      end
-    end)
+    IO.puts(
+      "  Found #{length(beam_files)} app beam files to check (#{length(all_beam_files)} total)"
+    )
 
-    IO.puts("  ✓ Copied beam files to loaded paths")
+    copied_count =
+      Enum.reduce(beam_files, 0, fn tarball_beam_path, acc ->
+        beam_filename = Path.basename(tarball_beam_path)
+        module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
+
+        case :code.which(module_name) do
+          path when is_list(path) ->
+            loaded_path = List.to_string(path)
+
+            # Compare MD5s to avoid unnecessary copies
+            should_copy =
+              case :beam_lib.md5(String.to_charlist(tarball_beam_path)) do
+                {:ok, {_mod, tarball_md5}} ->
+                  case :code.get_object_code(module_name) do
+                    {^module_name, binary, _filename} ->
+                      case :beam_lib.md5(binary) do
+                        {:ok, {^module_name, loaded_md5}} ->
+                          tarball_md5 != loaded_md5
+
+                        _ ->
+                          true
+                      end
+
+                    _ ->
+                      true
+                  end
+
+                _ ->
+                  true
+              end
+
+            if should_copy do
+              File.cp!(tarball_beam_path, loaded_path)
+              acc + 1
+            else
+              acc
+            end
+
+          _ ->
+            acc
+        end
+      end)
+
+    IO.puts(
+      "  ✓ Copied #{copied_count} changed beam files (skipped #{length(beam_files) - copied_count} unchanged)"
+    )
 
     # use :c.lm() to load modified modules (purges old code and loads new)
     IO.puts("Loading modified modules...")
