@@ -40,32 +40,48 @@ defmodule FlyDeploy.ReloadScript do
     File.mkdir_p!("/tmp/upgrade")
     :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"/tmp/upgrade"}])
 
+    # copy beam files to loaded paths (only if MD5 differs)
+    # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
     IO.puts("Copying beam files to currently loaded paths...")
-    # Instead of copying the whole lib directory (which has version-specific paths),
-    # we need to copy beam files directly to where they're currently loaded from
-    # Find all beam files in the tarball
-    beam_files = Path.wildcard("/tmp/upgrade/lib/**/ebin/*.beam")
-    IO.puts("  Found #{length(beam_files)} beam files to copy")
+    all_beam_files = Path.wildcard("/tmp/upgrade/lib/**/ebin/*.beam")
 
-    Enum.each(beam_files, fn tarball_beam_path ->
-      # extract just the beam filename
-      beam_filename = Path.basename(tarball_beam_path)
-      module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
+    # Filter to only the OTP app's beam files
+    app_version_dir = Path.basename(Application.app_dir(app))
 
-      # find where this module is currently loaded from
-      case :code.which(module_name) do
-        path when is_list(path) ->
-          loaded_path = List.to_string(path)
-          # Copy the new beam file to overwrite the currently loaded one
-          File.cp!(tarball_beam_path, loaded_path)
+    beam_files =
+      Enum.filter(all_beam_files, fn path ->
+        String.contains?(path, "/#{app_version_dir}/ebin/")
+      end)
 
-        _ ->
-          # module not currently loaded, skip it
-          :ok
-      end
-    end)
+    IO.puts(
+      "  Found #{length(beam_files)} app beam files to check (#{length(all_beam_files)} total)"
+    )
 
-    IO.puts("  ✓ Copied beam files to loaded paths")
+    copied_count =
+      Enum.reduce(beam_files, 0, fn tarball_beam_path, acc ->
+        beam_filename = Path.basename(tarball_beam_path)
+        module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
+
+        case :code.which(module_name) do
+          path when is_list(path) ->
+            loaded_path = List.to_string(path)
+
+            # Compare MD5s to avoid unnecessary copies
+            if beam_file_changed?(tarball_beam_path, module_name) do
+              File.cp!(tarball_beam_path, loaded_path)
+              acc + 1
+            else
+              acc
+            end
+
+          _ ->
+            acc
+        end
+      end)
+
+    IO.puts(
+      "  ✓ Copied #{copied_count} changed beam files (skipped #{length(beam_files) - copied_count} unchanged)"
+    )
 
     IO.puts("Performing safe hot upgrade...")
 
@@ -144,28 +160,7 @@ defmodule FlyDeploy.ReloadScript do
             loaded_path = List.to_string(path)
 
             # Compare MD5s to avoid unnecessary copies
-            should_copy =
-              case :beam_lib.md5(String.to_charlist(tarball_beam_path)) do
-                {:ok, {_mod, tarball_md5}} ->
-                  case :code.get_object_code(module_name) do
-                    {^module_name, binary, _filename} ->
-                      case :beam_lib.md5(binary) do
-                        {:ok, {^module_name, loaded_md5}} ->
-                          tarball_md5 != loaded_md5
-
-                        _ ->
-                          true
-                      end
-
-                    _ ->
-                      true
-                  end
-
-                _ ->
-                  true
-              end
-
-            if should_copy do
+            if beam_file_changed?(tarball_beam_path, module_name) do
               File.cp!(tarball_beam_path, loaded_path)
               acc + 1
             else
@@ -374,6 +369,29 @@ defmodule FlyDeploy.ReloadScript do
           false
       end
     end)
+  end
+
+  # Returns true if the tarball beam file differs from the currently loaded code
+  defp beam_file_changed?(tarball_beam_path, module_name) do
+    case :beam_lib.md5(String.to_charlist(tarball_beam_path)) do
+      {:ok, {_mod, tarball_md5}} ->
+        case :code.get_object_code(module_name) do
+          {^module_name, binary, _filename} ->
+            case :beam_lib.md5(binary) do
+              {:ok, {^module_name, loaded_md5}} ->
+                tarball_md5 != loaded_md5
+
+              _ ->
+                true
+            end
+
+          _ ->
+            true
+        end
+
+      _ ->
+        true
+    end
   end
 
   defp get_source_path(module) do
