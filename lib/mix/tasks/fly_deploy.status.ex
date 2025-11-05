@@ -80,10 +80,16 @@ defmodule Mix.Tasks.FlyDeploy.Status do
         IO.puts("Found #{length(app_machines)} app machines:")
         IO.puts("")
 
-        # Get status for each machine
-        Enum.each(app_machines, fn machine ->
-          show_machine_status(machine, app_name)
-        end)
+        # Get status for each machine concurrently
+        app_machines
+        |> Task.async_stream(
+          fn machine ->
+            show_machine_status(machine, app_name)
+          end,
+          max_concurrency: 20,
+          timeout: 30_000
+        )
+        |> Stream.run()
 
         IO.puts("")
       end
