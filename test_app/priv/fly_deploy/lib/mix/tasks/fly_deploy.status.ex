@@ -80,9 +80,21 @@ defmodule Mix.Tasks.FlyDeploy.Status do
         IO.puts("Found #{length(app_machines)} app machines:")
         IO.puts("")
 
-        # Get status for each machine
-        Enum.each(app_machines, fn machine ->
-          show_machine_status(machine, app_name)
+        # Get status for each machine concurrently, then print in order
+        results =
+          app_machines
+          |> Task.async_stream(
+            fn machine ->
+              get_machine_status(machine, app_name)
+            end,
+            max_concurrency: 20,
+            timeout: 30_000
+          )
+          |> Enum.map(fn {:ok, result} -> result end)
+
+        # Print results in order
+        Enum.each(results, fn status ->
+          print_machine_status(status)
         end)
 
         IO.puts("")
@@ -111,7 +123,7 @@ defmodule Mix.Tasks.FlyDeploy.Status do
     Jason.decode!(output)
   end
 
-  defp show_machine_status(machine, app_name) do
+  defp get_machine_status(machine, app_name) do
     machine_id = String.slice(machine["id"], 0, 14)
     full_machine_id = machine["id"]
     region = machine["region"]
@@ -125,69 +137,88 @@ defmodule Mix.Tasks.FlyDeploy.Status do
         _ -> "unknown"
       end
 
-    state_color = if state == "started", do: :green, else: :yellow
+    # Only try to get hot upgrade info if machine is started
+    # (can't RPC into stopped machines)
+    upgrade_info =
+      if state == "started" do
+        case get_hot_upgrade_info(app_name, full_machine_id) do
+          {:ok, info} -> {:ok, info, image_ref}
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        :stopped
+      end
+
+    %{
+      machine_id: machine_id,
+      region: region,
+      state: state,
+      deployment_id: deployment_id,
+      upgrade_info: upgrade_info
+    }
+  end
+
+  defp print_machine_status(status) do
+    state_color = if status.state == "started", do: :green, else: :yellow
 
     IO.puts(
       IO.ANSI.format([
         :bright,
-        "Machine: #{machine_id} (#{region}) ",
+        "Machine: #{status.machine_id} (#{status.region}) ",
         state_color,
-        "[#{state}]"
+        "[#{status.state}]"
       ])
     )
 
-    IO.puts("  Image: #{deployment_id}")
+    IO.puts("  Image: #{status.deployment_id}")
 
-    # Only try to get hot upgrade info if machine is started
-    # (can't RPC into stopped machines)
-    if state == "started" do
-      case get_hot_upgrade_info(app_name, full_machine_id) do
-        {:ok, info} ->
-          if info.hot_upgrade_applied do
-            IO.puts(
-              IO.ANSI.format([
-                :green,
-                "  Hot Upgrade: v#{info.version} (from #{info.source_deployment_id})"
-              ])
-            )
+    case status.upgrade_info do
+      {:ok, info, image_ref} ->
+        if info.hot_upgrade_applied do
+          IO.puts(
+            IO.ANSI.format([
+              :green,
+              "  Hot Upgrade: v#{info.version} (from #{info.source_deployment_id})"
+            ])
+          )
 
-            IO.puts("  Applied: #{info.deployed_at}")
+          IO.puts("  Applied: #{info.deployed_at}")
 
-            # Check if hot upgrade is stale by comparing machine's current image with S3 state's base image_ref
-            # If they match, hot upgrade is still valid. If not, a new cold deploy happened.
-            cond do
-              is_nil(info.base_image_ref) ->
-                IO.puts(
-                  IO.ANSI.format([
-                    :yellow,
-                    "  Status: ⚠ Cannot determine if stale (no base image ref in state)"
-                  ])
-                )
+          # Check if hot upgrade is stale by comparing machine's current image with S3 state's base image_ref
+          # If they match, hot upgrade is still valid. If not, a new cold deploy happened.
+          cond do
+            is_nil(info.base_image_ref) ->
+              IO.puts(
+                IO.ANSI.format([
+                  :yellow,
+                  "  Status: ⚠ Cannot determine if stale (no base image ref in state)"
+                ])
+              )
 
-              image_ref == info.base_image_ref ->
-                IO.puts(IO.ANSI.format([:green, "  Status: ✓ Hot upgrade is current"]))
+            image_ref == info.base_image_ref ->
+              IO.puts(IO.ANSI.format([:green, "  Status: ✓ Hot upgrade is current"]))
 
-              true ->
-                IO.puts(
-                  IO.ANSI.format([
-                    :red,
-                    "  Status: ✗ Hot upgrade is STALE (new cold deploy detected)"
-                  ])
-                )
-            end
-          else
-            IO.puts(IO.ANSI.format([:faint, "  Hot Upgrade: None"]))
-            IO.puts(IO.ANSI.format([:green, "  Status: ✓ Running base image"]))
+            true ->
+              IO.puts(
+                IO.ANSI.format([
+                  :red,
+                  "  Status: ✗ Hot upgrade is STALE (new cold deploy detected)"
+                ])
+              )
           end
+        else
+          IO.puts(IO.ANSI.format([:faint, "  Hot Upgrade: None"]))
+          IO.puts(IO.ANSI.format([:green, "  Status: ✓ Running base image"]))
+        end
 
-        {:error, reason} ->
-          IO.puts(IO.ANSI.format([:red, "  Hot Upgrade: Error - #{reason}"]))
-          IO.puts(IO.ANSI.format([:yellow, "  Status: ⚠ Could not check hot upgrade status"]))
-      end
-    else
-      # Machine is stopped, can't check hot upgrade status
-      IO.puts(IO.ANSI.format([:faint, "  Hot Upgrade: Unknown (machine stopped)"]))
-      IO.puts(IO.ANSI.format([:faint, "  Status: Machine not running"]))
+      {:error, reason} ->
+        IO.puts(IO.ANSI.format([:red, "  Hot Upgrade: Error - #{reason}"]))
+        IO.puts(IO.ANSI.format([:yellow, "  Status: ⚠ Could not check hot upgrade status"]))
+
+      :stopped ->
+        # Machine is stopped, can't check hot upgrade status
+        IO.puts(IO.ANSI.format([:faint, "  Hot Upgrade: Unknown (machine stopped)"]))
+        IO.puts(IO.ANSI.format([:faint, "  Status: Machine not running"]))
     end
 
     IO.puts("")

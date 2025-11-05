@@ -19,10 +19,14 @@ defmodule FlyDeploy.Config do
 
   ## Mix Config
 
-  In `config/config.exs`:
+  In `config/config.exs` or `config/runtime.exs`:
 
       config :fly_deploy,
         bucket: "my-releases",  # Optional - defaults to BUCKET_NAME env var
+        aws_access_key_id: System.get_env("CUSTOM_ACCESS_KEY"),  # Optional - defaults to AWS_ACCESS_KEY_ID
+        aws_secret_access_key: System.get_env("CUSTOM_SECRET_KEY"),  # Optional - defaults to AWS_SECRET_ACCESS_KEY
+        aws_endpoint_url_s3: System.get_env("CUSTOM_ENDPOINT"),  # Optional - defaults to AWS_ENDPOINT_URL_S3
+        aws_region: System.get_env("CUSTOM_REGION"),  # Optional - defaults to "auto"
         env: %{
           "AWS_ENDPOINT_URL_S3" => "https://fly.storage.tigris.dev",
           "AWS_REGION" => "auto"

@@ -4,6 +4,21 @@ defmodule FlyDeploy.ReloadScript do
 
   require Logger
 
+  defp aws_access_key_id do
+    Application.get_env(:fly_deploy, :aws_access_key_id) ||
+      System.fetch_env!("AWS_ACCESS_KEY_ID")
+  end
+
+  defp aws_secret_access_key do
+    Application.get_env(:fly_deploy, :aws_secret_access_key) ||
+      System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+  end
+
+  defp aws_region do
+    Application.get_env(:fly_deploy, :aws_region) ||
+      System.get_env("AWS_REGION", "auto")
+  end
+
   @doc """
   Normal hot upgrade on a running system.
 
@@ -23,10 +38,10 @@ defmodule FlyDeploy.ReloadScript do
         receive_timeout: 60_000,
         connect_options: [timeout: 60_000],
         aws_sigv4: [
-          access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-          secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+          access_key_id: aws_access_key_id(),
+          secret_access_key: aws_secret_access_key(),
           service: "s3",
-          region: "auto"
+          region: aws_region()
         ]
       )
 
@@ -130,10 +145,10 @@ defmodule FlyDeploy.ReloadScript do
         receive_timeout: 60_000,
         connect_options: [timeout: 60_000],
         aws_sigv4: [
-          access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-          secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+          access_key_id: aws_access_key_id(),
+          secret_access_key: aws_secret_access_key(),
           service: "s3",
-          region: "auto"
+          region: aws_region()
         ]
       )
 

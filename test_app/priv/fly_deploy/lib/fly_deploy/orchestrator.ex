@@ -65,7 +65,23 @@ defmodule FlyDeploy.Orchestrator do
   end
 
   defp s3_endpoint do
-    System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
+    Application.get_env(:fly_deploy, :aws_endpoint_url_s3) ||
+      System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
+  end
+
+  defp aws_access_key_id do
+    Application.get_env(:fly_deploy, :aws_access_key_id) ||
+      System.fetch_env!("AWS_ACCESS_KEY_ID")
+  end
+
+  defp aws_secret_access_key do
+    Application.get_env(:fly_deploy, :aws_secret_access_key) ||
+      System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+  end
+
+  defp aws_region do
+    Application.get_env(:fly_deploy, :aws_region) ||
+      System.get_env("AWS_REGION", "auto")
   end
 
   defp acquire_lock(app, deployment_id, bucket) do
@@ -75,10 +91,10 @@ defmodule FlyDeploy.Orchestrator do
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
 
     aws_opts = [
-      access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-      secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+      access_key_id: aws_access_key_id(),
+      secret_access_key: aws_secret_access_key(),
       service: "s3",
-      region: "auto"
+      region: aws_region()
     ]
 
     force = System.get_env("DEPLOY_FORCE") == "true"
@@ -198,10 +214,10 @@ defmodule FlyDeploy.Orchestrator do
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
 
     aws_opts = [
-      access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-      secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+      access_key_id: aws_access_key_id(),
+      secret_access_key: aws_secret_access_key(),
       service: "s3",
-      region: "auto"
+      region: aws_region()
     ]
 
     case Req.delete(url,
@@ -280,10 +296,10 @@ defmodule FlyDeploy.Orchestrator do
         body: content,
         headers: [{"content-type", "application/gzip"}],
         aws_sigv4: [
-          access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-          secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+          access_key_id: aws_access_key_id(),
+          secret_access_key: aws_secret_access_key(),
           service: "s3",
-          region: "auto"
+          region: aws_region()
         ]
       )
 
@@ -303,10 +319,10 @@ defmodule FlyDeploy.Orchestrator do
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
 
     aws_opts = [
-      access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-      secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+      access_key_id: aws_access_key_id(),
+      secret_access_key: aws_secret_access_key(),
       service: "s3",
-      region: "auto"
+      region: aws_region()
     ]
 
     # read existing current state (if it exists)
