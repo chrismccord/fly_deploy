@@ -22,3 +22,6 @@ that changed and precomputing changes
 
 ## 0.1.7 (2025-09-05)
 - Fix `mix fly_depoy.status` failing when more than one machine exists
+
+## 0.1.8 (2025-09-06)
+- Ensure consolidated protocols are upgraded
