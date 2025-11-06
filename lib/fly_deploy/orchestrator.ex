@@ -258,14 +258,17 @@ defmodule FlyDeploy.Orchestrator do
     IO.puts(ansi([:yellow], "--> Creating tarball"))
 
     version = Application.spec(app, :vsn) |> to_string()
-    tarball_path = "/tmp/#{app}-#{version}.tar.gz"
+    tarball_path = Path.join(System.tmp_dir!(), "#{app}-#{version}.tar.gz")
 
-    # find all beam files
+    # find all beam files (both lib and consolidated protocols)
     beam_files = Path.wildcard("/app/lib/**/ebin/*.beam")
+    consolidated_files = Path.wildcard("/app/releases/*/consolidated/*.beam")
+
+    all_files = beam_files ++ consolidated_files
 
     # create tar
     files_to_tar =
-      Enum.map(beam_files, fn path ->
+      Enum.map(all_files, fn path ->
         rel_path = Path.relative_to(path, "/app")
         {String.to_charlist(rel_path), String.to_charlist(path)}
       end)
@@ -276,9 +279,14 @@ defmodule FlyDeploy.Orchestrator do
     tarball_size = File.stat!(tarball_path).size
     size_mb = Float.round(tarball_size / 1_048_576, 1)
 
-    IO.puts(ansi([:green], "    ✓ Created #{length(beam_files)} modules (#{size_mb} MB)"))
+    IO.puts(
+      ansi(
+        [:green],
+        "    ✓ Created #{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols (#{size_mb} MB)"
+      )
+    )
 
-    {tarball_path, %{modules: length(beam_files), size_bytes: tarball_size}}
+    {tarball_path, %{modules: length(all_files), size_bytes: tarball_size}}
   end
 
   defp upload_to_tigris(tarball_path, app, version, bucket) do
@@ -428,12 +436,9 @@ defmodule FlyDeploy.Orchestrator do
       |> Enum.map(fn {:ok, result} -> result end)
 
     # filter to only app modules for successful results
-    results
-    |> Enum.map(fn result ->
+    Enum.map(results, fn result ->
       if result.success do
-        Map.update!(result, :module_names, fn modules ->
-          filter_app_modules(modules, app)
-        end)
+        Map.update!(result, :module_names, fn modules -> filter_app_modules(modules, app) end)
       else
         result
       end
@@ -442,7 +447,7 @@ defmodule FlyDeploy.Orchestrator do
 
   defp filter_app_modules(modules, app) do
     # get the app directory (e.g., /app/lib/test_app-0.1.0)
-    app_dir = Application.app_dir(app) |> to_string()
+    app_dir = to_string(Application.app_dir(app))
 
     Enum.filter(modules, fn module_name ->
       # convert module name string back to atom to check code path
@@ -450,12 +455,9 @@ defmodule FlyDeploy.Orchestrator do
 
       case :code.which(module) do
         # module is loaded, check if it's in the app directory
-        path when is_list(path) ->
-          String.starts_with?(to_string(path), app_dir)
-
+        path when is_list(path) -> String.starts_with?(to_string(path), app_dir)
         # module not loaded or preloaded
-        _ ->
-          false
+        _ -> false
       end
     end)
   end

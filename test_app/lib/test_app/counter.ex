@@ -6,6 +6,12 @@ defmodule TestApp.Counter do
 
   @counter_vsn "v3"
 
+  # Define a struct to test protocol implementations
+  defmodule State do
+    @moduledoc false
+    defstruct [:count, :version, :protocol_version]
+  end
+
   # Client API
 
   def start_link(opts) do
@@ -30,7 +36,7 @@ defmodule TestApp.Counter do
 
   @impl true
   def init(_opts) do
-    {:ok, %{count: 0, version: @counter_vsn}}
+    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v1"}}
   end
 
   @impl true
@@ -46,7 +52,14 @@ defmodule TestApp.Counter do
 
   @impl true
   def handle_call(:get_info, _from, state) do
-    {:reply, %{count: state.count, version: Map.get(state, :version, 1), pid: self()}, state}
+    {:reply, %{
+      count: state.count,
+      version: state.version,
+      pid: self(),
+      protocol_version: state.protocol_version,
+      string_representation: to_string(state),
+      protocol_consolidated: Protocol.consolidated?(String.Chars)
+    }, state}
   end
 
   @impl true
@@ -56,3 +69,11 @@ defmodule TestApp.Counter do
     {:ok, Map.put(state, :version, vsn())}
   end
 end
+
+# Protocol implementation for testing consolidated protocol hot upgrades
+defimpl String.Chars, for: TestApp.Counter.State do
+  def to_string(%TestApp.Counter.State{} = state) do
+    "Counter[count=#{state.count}, version=#{state.version}, protocol_v=#{state.protocol_version}]"
+  end
+end
+

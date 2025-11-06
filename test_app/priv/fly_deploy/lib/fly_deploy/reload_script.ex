@@ -25,11 +25,33 @@ defmodule FlyDeploy.ReloadScript do
   Uses suspend/resume for safe process upgrades.
   """
   def hot_upgrade(tarball_url, app) do
+    try do
+      do_hot_upgrade(tarball_url, app)
+    rescue
+      e ->
+        # report error back via JSON for debugging
+        error_result = %{
+          success: false,
+          error: %{
+            type: inspect(e.__struct__),
+            message: Exception.message(e),
+            stacktrace: Exception.format_stacktrace(__STACKTRACE__)
+          }
+        }
+
+        print_json(error_result)
+        reraise e, __STACKTRACE__
+    end
+  end
+
+  defp do_hot_upgrade(tarball_url, app) do
     IO.puts("Downloading tarball from #{tarball_url}...")
     {:ok, _} = Application.ensure_all_started(:req)
 
     # use AWS SigV4 for authenticated download
-    tmp_file_path = Path.join(System.tmp_dir!(), "fly_deploy_upgrade.tar.gz")
+    tmp_dir = System.tmp_dir!()
+    tmp_file_path = Path.join(tmp_dir, "fly_deploy_upgrade.tar.gz")
+    upgrade_dir = Path.join(tmp_dir, "upgrade")
 
     response =
       Req.get!(tarball_url,
@@ -45,20 +67,20 @@ defmodule FlyDeploy.ReloadScript do
         ]
       )
 
-    Logger.info("[FlyDeploy.ReloadScript] Download response: #{response.status}")
+    Logger.info("[#{inspect(__MODULE__)}] Download response: #{response.status}")
 
     # check downloaded tarball
     download_size = File.stat!(tmp_file_path).size
     IO.puts("  Downloaded: #{download_size} bytes")
 
     IO.puts("Extracting...")
-    File.mkdir_p!("/tmp/upgrade")
-    :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"/tmp/upgrade"}])
+    File.mkdir_p!(upgrade_dir)
+    :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
     IO.puts("Copying beam files to currently loaded paths...")
-    all_beam_files = Path.wildcard("/tmp/upgrade/lib/**/ebin/*.beam")
+    all_beam_files = Path.wildcard(Path.join([upgrade_dir, "lib", "**", "ebin", "*.beam"]))
 
     # Filter to only the OTP app's beam files
     app_version_dir = Path.basename(Application.app_dir(app))
@@ -97,6 +119,31 @@ defmodule FlyDeploy.ReloadScript do
     IO.puts(
       "  ✓ Copied #{copied_count} changed beam files (skipped #{length(beam_files) - copied_count} unchanged)"
     )
+
+    # copy consolidated protocol beams
+    IO.puts("Copying consolidated protocols...")
+    consolidated_files = Path.wildcard(Path.join([upgrade_dir, "releases", "*", "consolidated", "*.beam"]))
+
+    consolidated_copied_count =
+      Enum.reduce(consolidated_files, 0, fn tarball_beam_path, acc ->
+        # Extract the release version and beam filename
+        # Path format: <upgrade_dir>/releases/0.1.0/consolidated/Elixir.Jason.Encoder.beam
+        [_, version, _, beam_filename] =
+          tarball_beam_path
+          |> String.replace_prefix(upgrade_dir <> "/", "")
+          |> Path.split()
+
+        # target path on the running system
+        target_path = Path.join(["/app/releases", version, "consolidated", beam_filename])
+
+        # ensure the consolidated directory exists
+        target_dir = Path.dirname(target_path)
+        File.mkdir_p!(target_dir)
+        File.cp!(tarball_beam_path, target_path)
+        acc + 1
+      end)
+
+    IO.puts("  ✓ Copied #{consolidated_copied_count} consolidated protocol beams")
 
     IO.puts("Performing safe hot upgrade...")
 
@@ -111,8 +158,8 @@ defmodule FlyDeploy.ReloadScript do
 
     IO.puts("✅ Hot reload complete!")
 
-    # Output JSON result for parsing by orchestrator
-    json_result = %{
+    # output JSON result for parsing by orchestrator
+    print_json(%{
       success: result.processes_failed == 0,
       modules_reloaded: result.modules_reloaded,
       module_names: result.module_names,
@@ -120,9 +167,7 @@ defmodule FlyDeploy.ReloadScript do
       process_names: result.process_names,
       processes_failed: result.processes_failed,
       suspend_duration_ms: result.suspend_duration_ms
-    }
-
-    IO.puts("__FLY_DEPLOY_RESULT__#{JSON.encode!(json_result)}__FLY_DEPLOY_RESULT__")
+    })
   end
 
   @doc """
@@ -134,13 +179,30 @@ defmodule FlyDeploy.ReloadScript do
   2. Doesn't need to suspend/resume processes (they don't exist yet)
   """
   def replay_upgrade_startup(tarball_url, app) do
+    try do
+      do_replay_upgrade_startup(tarball_url, app)
+    rescue
+      e ->
+        IO.puts("Error during startup hot upgrade replay:")
+        IO.puts("  #{Exception.message(e)}")
+        IO.puts("\nStacktrace:")
+        IO.puts(Exception.format_stacktrace(__STACKTRACE__))
+        reraise e, __STACKTRACE__
+    end
+  end
+
+  defp do_replay_upgrade_startup(tarball_url, app) do
     IO.puts("Replaying hot upgrade from #{tarball_url} on startup...")
     {:ok, _} = Application.ensure_all_started(:req)
+
+    tmp_dir = System.tmp_dir!()
+    tmp_file_path = Path.join(tmp_dir, "upgrade.tar.gz")
+    upgrade_dir = Path.join(tmp_dir, "upgrade")
 
     # download tarball
     response =
       Req.get!(tarball_url,
-        into: File.stream!("/tmp/upgrade.tar.gz", [:write, :binary]),
+        into: File.stream!(tmp_file_path, [:write, :binary]),
         raw: true,
         receive_timeout: 60_000,
         connect_options: [timeout: 60_000],
@@ -152,21 +214,21 @@ defmodule FlyDeploy.ReloadScript do
         ]
       )
 
-    Logger.info("[FlyDeploy.ReloadScript] Download response: #{response.status}")
-    download_size = File.stat!("/tmp/upgrade.tar.gz").size
+    Logger.info("[#{inspect(__MODULE__)}] Download response: #{response.status}")
+    download_size = File.stat!(tmp_file_path).size
     IO.puts("  Downloaded: #{download_size} bytes")
 
     # extract tarball
     IO.puts("Extracting...")
-    File.mkdir_p!("/tmp/upgrade")
-    :erl_tar.extract(~c"/tmp/upgrade.tar.gz", [:compressed, {:cwd, ~c"/tmp/upgrade"}])
+    File.mkdir_p!(upgrade_dir)
+    :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
     IO.puts("Copying beam files to currently loaded paths...")
-    all_beam_files = Path.wildcard("/tmp/upgrade/lib/**/ebin/*.beam")
+    all_beam_files = Path.wildcard(Path.join([upgrade_dir, "lib", "**", "ebin", "*.beam"]))
 
-    # Filter to only the OTP app's beam files
+    # filter to only the OTP app's beam files
     app_version_dir = Path.basename(Application.app_dir(app))
 
     beam_files =
@@ -203,6 +265,30 @@ defmodule FlyDeploy.ReloadScript do
     IO.puts(
       "  ✓ Copied #{copied_count} changed beam files (skipped #{length(beam_files) - copied_count} unchanged)"
     )
+
+    # copy consolidated protocol beams
+    IO.puts("Copying consolidated protocol beams...")
+    consolidated_files = Path.wildcard(Path.join([upgrade_dir, "releases", "*", "consolidated", "*.beam"]))
+
+    consolidated_copied_count =
+      Enum.reduce(consolidated_files, 0, fn tarball_beam_path, acc ->
+        # extract the release version and beam filename
+        [_, version, _, beam_filename] =
+          tarball_beam_path
+          |> String.replace_prefix(upgrade_dir <> "/", "")
+          |> Path.split()
+
+        # target path on the running system
+        target_path = Path.join(["/app/releases", version, "consolidated", beam_filename])
+
+        # ensure the consolidated directory exists
+        target_dir = Path.dirname(target_path)
+        File.mkdir_p!(target_dir)
+        File.cp!(tarball_beam_path, target_path)
+        acc + 1
+      end)
+
+    IO.puts("  ✓ Copied #{consolidated_copied_count} consolidated protocol beams")
 
     # use :c.lm() to load modified modules (purges old code and loads new)
     IO.puts("Loading modified modules...")
@@ -223,30 +309,30 @@ defmodule FlyDeploy.ReloadScript do
   # - `processes_failed` - Number of processes that failed to upgrade
   # - `processes_skipped` - Number of processes skipped (not GenServer/proc_lib)
   defp safe_upgrade_application(app) do
-    Logger.info("[FlyDeploy.ReloadScript] Starting safe upgrade for #{app}")
+    Logger.info("[#{inspect(__MODULE__)}] Starting safe upgrade for #{app}")
 
     # detect changed modules
     changed_modules = :code.modified_modules()
-    Logger.info("[FlyDeploy.ReloadScript] Changed modules: #{inspect(changed_modules)}")
+    Logger.info("[#{inspect(__MODULE__)}] Changed modules: #{inspect(changed_modules)}")
 
     # find all processes that need upgrading BEFORE loading new code
     processes = find_processes_to_upgrade(changed_modules)
-    Logger.info("[FlyDeploy.ReloadScript] Found #{length(processes)} processes to upgrade")
+    Logger.info("[#{inspect(__MODULE__)}] Found #{length(processes)} processes to upgrade")
 
     # phase 1: Suspend ALL processes
     suspend_start = System.monotonic_time(:millisecond)
-    Logger.info("[FlyDeploy.ReloadScript] Phase 1: Suspending all processes...")
+    Logger.info("[#{inspect(__MODULE__)}] Phase 1: Suspending all processes...")
 
     suspended_processes =
       Enum.map(processes, fn {pid, module} ->
         try do
           :sys.suspend(pid)
-          Logger.info("[FlyDeploy.ReloadScript] Suspended process #{inspect(pid)} (#{module})")
+          Logger.info("[#{inspect(__MODULE__)}] Suspended process #{inspect(pid)} (#{module})")
           {:ok, pid, module}
         rescue
           e ->
             Logger.error(
-              "[FlyDeploy.ReloadScript] Failed to suspend process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
+              "[#{inspect(__MODULE__)}] Failed to suspend process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
             )
 
             {:error, pid, module}
@@ -258,48 +344,52 @@ defmodule FlyDeploy.ReloadScript do
       |> Enum.filter(fn {status, _, _} -> status == :ok end)
 
     Logger.info(
-      "[FlyDeploy.ReloadScript] Suspended #{length(successfully_suspended)} processes successfully"
+      "[#{inspect(__MODULE__)}] Suspended #{length(successfully_suspended)} processes successfully"
     )
 
     # phase 2: Reload ALL changed modules (while all processes are suspended)
-    Logger.info("[FlyDeploy.ReloadScript] Phase 2: Reloading all modules...")
+    Logger.info("[#{inspect(__MODULE__)}] Phase 2: Reloading all modules...")
 
+    # reload regular changed modules
     Enum.each(changed_modules, fn module ->
-      Logger.info("[FlyDeploy.ReloadScript] Reloading module: #{module}")
+      Logger.info("[#{inspect(__MODULE__)}] Reloading module: #{module}")
       :code.purge(module)
       {:module, ^module} = :code.load_file(module)
     end)
 
-    # phase 3: Upgrade ALL processes (call code_change on each)
-    Logger.info("[FlyDeploy.ReloadScript] Phase 3: Upgrading all processes...")
+    # reload consolidated protocols (they may not show up in :code.modified_modules)
+    reload_consolidated_protocols()
+
+    # phase 3: Upgrade all processes (call code_change on each)
+    Logger.info("[#{inspect(__MODULE__)}] Phase 3: Upgrading all processes...")
 
     upgrade_results =
       Enum.map(successfully_suspended, fn {:ok, pid, module} ->
         try do
           :sys.change_code(pid, module, :undefined, [])
-          Logger.info("[FlyDeploy.ReloadScript] Upgraded process #{inspect(pid)} (#{module})")
+          Logger.info("[#{inspect(__MODULE__)}] Upgraded process #{inspect(pid)} (#{module})")
           {:ok, pid, module}
         rescue
           e ->
             Logger.error(
-              "[FlyDeploy.ReloadScript] Failed to upgrade process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
+              "[#{inspect(__MODULE__)}] Failed to upgrade process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
             )
 
             {:error, pid, module}
         end
       end)
 
-    # phase 4: Resume ALL processes (even failed ones, to avoid leaving them suspended)
-    Logger.info("[FlyDeploy.ReloadScript] Phase 4: Resuming all processes...")
+    # phase 4: Resume all processes (even failed ones, to avoid leaving them suspended)
+    Logger.info("[#{inspect(__MODULE__)}] Phase 4: Resuming all processes...")
 
     Enum.each(successfully_suspended, fn {:ok, pid, module} ->
       try do
         :sys.resume(pid)
-        Logger.info("[FlyDeploy.ReloadScript] Resumed process #{inspect(pid)} (#{module})")
+        Logger.info("[#{inspect(__MODULE__)}] Resumed process #{inspect(pid)} (#{module})")
       rescue
         e ->
           Logger.error(
-            "[FlyDeploy.ReloadScript] Failed to resume process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
+            "[#{inspect(__MODULE__)}] Failed to resume process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
           )
       end
     end)
@@ -307,7 +397,7 @@ defmodule FlyDeploy.ReloadScript do
     suspend_end = System.monotonic_time(:millisecond)
     suspend_duration_ms = suspend_end - suspend_start
 
-    Logger.info("[FlyDeploy.ReloadScript] Processes were suspended for #{suspend_duration_ms}ms")
+    Logger.info("[#{inspect(__MODULE__)}] Processes were suspended for #{suspend_duration_ms}ms")
 
     # phase 5: Trigger LiveView reloads for upgraded LiveView modules (if any)
     trigger_liveview_reloads(changed_modules)
@@ -316,19 +406,14 @@ defmodule FlyDeploy.ReloadScript do
     succeeded = Enum.count(upgrade_results, fn {status, _, _} -> status == :ok end)
     failed = Enum.count(upgrade_results, fn {status, _, _} -> status == :error end)
 
-    # Extract module names (without "Elixir." prefix for cleaner output)
-    module_names =
-      Enum.map(changed_modules, fn mod ->
-        mod |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
-      end)
+    # extract module names (without "Elixir." prefix for cleaner output)
+    module_names = Enum.map(changed_modules, fn mod -> inspect(mod) end)
 
-    # Extract process module names (without "Elixir." prefix)
+    # extract process module names (without "Elixir." prefix)
     process_names =
       upgrade_results
       |> Enum.filter(fn {status, _, _} -> status == :ok end)
-      |> Enum.map(fn {:ok, _pid, module} ->
-        module |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
-      end)
+      |> Enum.map(fn {:ok, _pid, module} -> inspect(module) end)
       |> Enum.uniq()
 
     stats = %{
@@ -341,7 +426,7 @@ defmodule FlyDeploy.ReloadScript do
       suspend_duration_ms: suspend_duration_ms
     }
 
-    Logger.info("[FlyDeploy.ReloadScript] Upgrade complete: #{inspect(stats)}")
+    Logger.info("[#{inspect(__MODULE__)}] Upgrade complete: #{inspect(stats)}")
     stats
   end
 
@@ -367,36 +452,38 @@ defmodule FlyDeploy.ReloadScript do
           nil
       end
     end)
-    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(& &1)
   end
 
   defp trigger_liveview_reloads(changed_modules) do
     # filter to only LiveView modules
-    liveview_modules = Enum.filter(changed_modules, &liveview_module?/1)
-
-    unless Enum.empty?(liveview_modules) do
-      Logger.info("[FlyDeploy.ReloadScript] Phase 5: Triggering LiveView reloads...")
-
-      Logger.info(
-        "[FlyDeploy.ReloadScript] Found #{length(liveview_modules)} LiveView modules to reload"
-      )
-
-      # find all LiveView process PIDs
-      liveview_pids = find_liveview_processes()
-
-      # for each upgraded LiveView module, send reload message to all LiveView processes
-      Enum.each(liveview_modules, fn module ->
-        # Get the actual source file path from the module's compile info
-        source_path = get_source_path(module)
-
-        Enum.each(liveview_pids, fn pid ->
-          send(pid, {:phoenix_live_reload, "fly_deploy", source_path})
-        end)
+    case Enum.filter(changed_modules, &liveview_module?/1) do
+      [_ | _] = liveview_modules ->
+        Logger.info("[#{inspect(__MODULE__)}] Phase 5: Triggering LiveView reloads...")
 
         Logger.info(
-          "[FlyDeploy.ReloadScript] Sent LiveView reload for #{module} to #{length(liveview_pids)} LiveView processes (#{source_path})"
+          "[#{inspect(__MODULE__)}] Found #{length(liveview_modules)} LiveView modules to reload"
         )
-      end)
+
+        # find all LiveView process PIDs
+        liveview_pids = find_liveview_processes()
+
+        # for each upgraded LiveView module, send reload message to all LiveView processes
+        Enum.each(liveview_modules, fn module ->
+          # Get the actual source file path from the module's compile info
+          source_path = get_source_path(module)
+
+          Enum.each(liveview_pids, fn pid ->
+            send(pid, {:phoenix_live_reload, "fly_deploy", source_path})
+          end)
+
+          Logger.info(
+            "[#{inspect(__MODULE__)}] Sent LiveView reload for #{module} to #{length(liveview_pids)} LiveView processes (#{source_path})"
+          )
+        end)
+
+      [] ->
+        :noop
     end
   end
 
@@ -404,8 +491,7 @@ defmodule FlyDeploy.ReloadScript do
     # find all processes running Phoenix.LiveView
     # LiveView processes have a $process_label key in their dictionary
     # with format: {Phoenix.LiveView, ModuleName, "lv:phx-..."}
-    Process.list()
-    |> Enum.filter(fn pid ->
+    Enum.filter(Process.list(), fn pid ->
       case Process.info(pid, [:dictionary]) do
         [dictionary: dict] ->
           match?({Phoenix.LiveView, _, _}, Keyword.get(dict, :"$process_label"))
@@ -416,18 +502,15 @@ defmodule FlyDeploy.ReloadScript do
     end)
   end
 
-  # Returns true if the tarball beam file differs from the currently loaded code
+  # returns true if the tarball beam file differs from the currently loaded code
   defp beam_file_changed?(tarball_beam_path, module_name) do
     case :beam_lib.md5(String.to_charlist(tarball_beam_path)) do
       {:ok, {_mod, tarball_md5}} ->
         case :code.get_object_code(module_name) do
           {^module_name, binary, _filename} ->
             case :beam_lib.md5(binary) do
-              {:ok, {^module_name, loaded_md5}} ->
-                tarball_md5 != loaded_md5
-
-              _ ->
-                true
+              {:ok, {^module_name, loaded_md5}} -> tarball_md5 != loaded_md5
+              _ -> true
             end
 
           _ ->
@@ -440,7 +523,7 @@ defmodule FlyDeploy.ReloadScript do
   end
 
   defp get_source_path(module) do
-    case module.module_info(:compile) |> Keyword.get(:source) do
+    case Keyword.get(module.module_info(:compile), :source) do
       path when is_list(path) -> List.to_string(path)
       path when is_binary(path) -> path
       _ -> inspect(module)
@@ -449,13 +532,41 @@ defmodule FlyDeploy.ReloadScript do
 
   defp liveview_module?(module) do
     try do
-      behaviours =
-        module.module_info(:attributes)
-        |> Keyword.get(:behaviour, [])
-
+      behaviours = Keyword.get(module.module_info(:attributes), :behaviour, [])
       Phoenix.LiveView in behaviours or Phoenix.LiveComponent in behaviours
     rescue
       _ -> false
     end
+  end
+
+  defp reload_consolidated_protocols do
+    # find all consolidated protocol beams in the release
+    case Path.wildcard("/app/releases/*/consolidated/*.beam") do
+      [] ->
+        Logger.info("[#{inspect(__MODULE__)}] No consolidated protocols found")
+
+      [_ | _] = consolidated_beams ->
+        Logger.info(
+          "[#{inspect(__MODULE__)}] Reloading #{length(consolidated_beams)} consolidated protocols"
+        )
+
+        Enum.each(consolidated_beams, fn beam_path ->
+          # extract module name from beam filename
+          module_name =
+            beam_path
+            |> Path.basename(".beam")
+            |> String.to_atom()
+
+          # purge and reload the consolidated protocol
+          Logger.info("[#{inspect(__MODULE__)}] Reloading consolidated protocol: #{module_name}")
+
+          :code.purge(module_name)
+          :code.load_file(module_name)
+        end)
+    end
+  end
+
+  defp print_json(%{} = map) do
+    IO.puts("__FLY_DEPLOY_RESULT__#{Jason.encode!(map)}__FLY_DEPLOY_RESULT__")
   end
 end

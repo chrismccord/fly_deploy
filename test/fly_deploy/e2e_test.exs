@@ -88,11 +88,42 @@ defmodule FlyDeploy.E2ETest do
 
     IO.puts("✓ Counter state captured\n")
 
+    # Step 2a: Verify v1 consolidated protocols exist before hot upgrade
+    IO.puts("Step 2a: Verifying v1 consolidated protocols exist before hot upgrade...")
+
+    machines_output =
+      System.cmd("fly", ["machines", "list", "-a", "hot-test-app", "--json"], cd: @test_app_dir)
+
+    machines = Jason.decode!(elem(machines_output, 0))
+    machine_id = hd(machines)["id"]
+
+    {pre_check, _} =
+      System.cmd(
+        "fly",
+        [
+          "ssh",
+          "console",
+          "-a",
+          "hot-test-app",
+          "--machine",
+          machine_id,
+          "-C",
+          "/app/bin/test_app eval 'md5 = :crypto.hash(:md5, File.read!(\"/app/releases/0.1.0/consolidated/Elixir.String.Chars.beam\")) |> Base.encode16(); IO.puts(Jason.encode!(%{md5: md5}))'"
+        ],
+        cd: @test_app_dir
+      )
+
+    pre_json = pre_check |> String.split("\n") |> Enum.find("", &String.starts_with?(&1, "{"))
+    pre_md5_info = Jason.decode!(pre_json)
+    v1_md5 = pre_md5_info["md5"]
+    IO.puts("  Before hot upgrade - String.Chars MD5: #{v1_md5}")
+    IO.puts("✓ Recorded v1 consolidated protocol MD5\n")
+
     # Step 3: Perform hot upgrade to v2
     IO.puts("Step 3: Performing hot upgrade to v2...")
     update_health_controller_version("v2")
     update_counter_module("v2")
-    deploy_hot()
+    _hot_upgrade_output = deploy_hot()
     wait_for_deployment()
 
     # Step 3a: Verify status shows hot upgrade applied
@@ -125,6 +156,63 @@ defmodule FlyDeploy.E2ETest do
       "✓ Hot upgrade successful - counter state preserved, version updated to v2, PID unchanged\n"
     )
 
+    # Step 4a: Verify consolidated protocol implementation was upgraded
+    IO.puts("Step 4a: Verifying consolidated protocol (String.Chars) was upgraded...")
+
+    # First, verify the protocol is actually consolidated (not falling back to non-consolidated)
+    assert after_upgrade["counter"]["protocol_consolidated"] == true,
+           "String.Chars protocol should be consolidated"
+
+    # The string_representation uses the String.Chars protocol implementation
+    # v1 format: "Counter[...]"
+    # v2 format: "CounterV2[...]" (note the "V2" prefix)
+    # If it shows "CounterV2[", that proves the protocol implementation was upgraded
+    assert String.starts_with?(after_upgrade["counter"]["string_representation"], "CounterV2["),
+           "Protocol implementation should use v2 format starting with 'CounterV2[' (got: #{after_upgrade["counter"]["string_representation"]})"
+
+    IO.puts("  Protocol consolidated: #{after_upgrade["counter"]["protocol_consolidated"]}")
+    IO.puts("  String representation: #{after_upgrade["counter"]["string_representation"]}")
+
+    IO.puts(
+      "✓ Consolidated protocol upgraded - String.Chars implementation changed from v1 to v2\n"
+    )
+
+    # Step 4b: Check if consolidated beam MD5 changed (proves it was copied)
+    # V2 adds TestApp.Counter.MetricsSnapshot struct with String.Chars protocol implementation
+    # This forces the consolidated protocol dispatch table to change, which changes the beam MD5
+    # If consolidated protocols aren't being copied, the MD5 would stay the same
+    IO.puts("Step 4b: Verifying consolidated protocol beam file was updated...")
+
+    {post_check, _} =
+      System.cmd(
+        "fly",
+        [
+          "ssh",
+          "console",
+          "-a",
+          "hot-test-app",
+          "--machine",
+          machine_id,
+          "-C",
+          "/app/bin/test_app eval 'md5 = :crypto.hash(:md5, File.read!(\"/app/releases/0.1.0/consolidated/Elixir.String.Chars.beam\")) |> Base.encode16(); IO.puts(Jason.encode!(%{md5: md5}))'"
+        ],
+        cd: @test_app_dir
+      )
+
+    post_json = post_check |> String.split("\n") |> Enum.find("", &String.starts_with?(&1, "{"))
+    post_md5_info = Jason.decode!(post_json)
+    v2_md5 = post_md5_info["md5"]
+
+    IO.puts("  After hot upgrade - String.Chars MD5: #{v2_md5}")
+    IO.puts("  MD5 changed: #{v1_md5 != v2_md5}")
+
+    assert v1_md5 != v2_md5,
+           "Consolidated protocol beam MD5 must change after hot upgrade (proves it was copied). V1: #{v1_md5}, V2: #{v2_md5}"
+
+    IO.puts(
+      "✓ VERIFIED: Consolidated protocol beam file was copied (MD5 changed from v1 to v2)\n"
+    )
+
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
     restart_all_machines()
@@ -140,6 +228,13 @@ defmodule FlyDeploy.E2ETest do
     assert after_restart["counter"]["version"] == "v2",
            "Version should be v2 (fresh init with v2 code)"
 
+    # Verify consolidated protocol is still active after restart
+    assert after_restart["counter"]["protocol_consolidated"] == true,
+           "String.Chars protocol should still be consolidated after restart"
+
+    assert String.starts_with?(after_restart["counter"]["string_representation"], "CounterV2["),
+           "Protocol implementation should still be v2 after restart"
+
     restart_pid = after_restart["counter"]["pid"]
     refute restart_pid == before_pid, "Counter should have new PID after restart"
 
@@ -147,7 +242,11 @@ defmodule FlyDeploy.E2ETest do
       "  Counter after restart: count=#{after_restart["counter"]["count"]}, version=#{after_restart["counter"]["version"]}, pid=#{restart_pid}"
     )
 
-    IO.puts("✓ Startup reapply successful - still running v2 with fresh state\n")
+    IO.puts("  Protocol consolidated: #{after_restart["counter"]["protocol_consolidated"]}")
+
+    IO.puts(
+      "✓ Startup reapply successful - still running v2 with fresh state and consolidated protocols\n"
+    )
 
     # Step 7: Cold deploy v3 and verify hot upgrade does NOT get applied
     IO.puts("Step 7: Cold deploying v3 to verify hot upgrade is not reapplied...")
@@ -193,7 +292,10 @@ defmodule FlyDeploy.E2ETest do
           counter: %{
             count: counter_info.count,
             version: counter_info.version,
-            pid: inspect(counter_info.pid)
+            pid: inspect(counter_info.pid),
+            protocol_version: counter_info.protocol_version,
+            string_representation: counter_info.string_representation,
+            protocol_consolidated: counter_info.protocol_consolidated
           }
         })
       end
@@ -211,6 +313,86 @@ defmodule FlyDeploy.E2ETest do
   defp update_counter_module(version) do
     counter_path = Path.join(@test_app_dir, "lib/test_app/counter.ex")
 
+    # Determine protocol version based on counter version
+    protocol_version =
+      case version do
+        "v1" -> "v1"
+        "v2" -> "v2"
+        _ -> "v1"
+      end
+
+    # Change the protocol implementation format string between v1 and v2
+    protocol_format =
+      case version do
+        "v1" ->
+          "Counter[count=\#{state.count}, version=\#{state.version}, protocol_v=\#{state.protocol_version}]"
+
+        "v2" ->
+          "CounterV2[count=\#{state.count}, version=\#{state.version}, protocol_v=\#{state.protocol_version}]"
+
+        _ ->
+          "Counter[count=\#{state.count}, version=\#{state.version}, protocol_v=\#{state.protocol_version}]"
+      end
+
+    # V2 adds a new struct type to force consolidated protocol dispatch table change
+    metrics_snapshot_struct =
+      if version == "v2" do
+        """
+
+          # V2 ONLY: New struct to test consolidated protocol dispatch changes
+          defmodule MetricsSnapshot do
+            @moduledoc false
+            defstruct [:count, :timestamp]
+          end
+        """
+      else
+        ""
+      end
+
+    # V2 adds get_metrics_snapshot function
+    metrics_snapshot_client =
+      if version == "v2" do
+        """
+
+          def get_metrics_snapshot do
+            GenServer.call(__MODULE__, :get_metrics_snapshot)
+          end
+        """
+      else
+        ""
+      end
+
+    # V2 adds handle_call for get_metrics_snapshot
+    metrics_snapshot_handler =
+      if version == "v2" do
+        """
+
+          @impl true
+          def handle_call(:get_metrics_snapshot, _from, state) do
+            snapshot = %MetricsSnapshot{count: state.count, timestamp: System.system_time(:second)}
+            {:reply, to_string(snapshot), state}
+          end
+        """
+      else
+        ""
+      end
+
+    # V2 adds String.Chars implementation for MetricsSnapshot
+    metrics_snapshot_protocol =
+      if version == "v2" do
+        """
+
+        # V2 ONLY: New protocol implementation to force consolidated dispatch table change
+        defimpl String.Chars, for: TestApp.Counter.MetricsSnapshot do
+          def to_string(%TestApp.Counter.MetricsSnapshot{} = snap) do
+            "Metrics[count=\#{snap.count}, ts=\#{snap.timestamp}]"
+          end
+        end
+        """
+      else
+        ""
+      end
+
     content = """
     defmodule TestApp.Counter do
       @moduledoc \"\"\"
@@ -220,6 +402,12 @@ defmodule FlyDeploy.E2ETest do
 
       @counter_vsn #{inspect(version)}
 
+      # Define a struct to test protocol implementations
+      defmodule State do
+        @moduledoc false
+        defstruct [:count, :version, :protocol_version]
+      end
+    #{metrics_snapshot_struct}
       # Client API
 
       def start_link(opts) do
@@ -237,14 +425,14 @@ defmodule FlyDeploy.E2ETest do
       def get_info do
         GenServer.call(__MODULE__, :get_info)
       end
-
+    #{metrics_snapshot_client}
       def vsn, do: @counter_vsn
 
       # Server Callbacks
 
       @impl true
       def init(_opts) do
-        {:ok, %{count: 0, version: @counter_vsn}}
+        {:ok, %State{count: 0, version: @counter_vsn, protocol_version: #{inspect(protocol_version)}}}
       end
 
       @impl true
@@ -260,9 +448,16 @@ defmodule FlyDeploy.E2ETest do
 
       @impl true
       def handle_call(:get_info, _from, state) do
-        {:reply, %{count: state.count, version: Map.get(state, :version, 1), pid: self()}, state}
+        {:reply, %{
+          count: state.count,
+          version: state.version,
+          pid: self(),
+          protocol_version: state.protocol_version,
+          string_representation: to_string(state),
+          protocol_consolidated: Protocol.consolidated?(String.Chars)
+        }, state}
       end
-
+    #{metrics_snapshot_handler}
       @impl true
       def code_change(_old_vsn, state, _extra) do
         # Migrate state - update version to new module version to prove code_change was called
@@ -270,10 +465,18 @@ defmodule FlyDeploy.E2ETest do
         {:ok, Map.put(state, :version, vsn())}
       end
     end
+
+    # Protocol implementation for testing consolidated protocol hot upgrades
+    defimpl String.Chars, for: TestApp.Counter.State do
+      def to_string(%TestApp.Counter.State{} = state) do
+        "#{protocol_format}"
+      end
+    end
+    #{metrics_snapshot_protocol}
     """
 
     File.write!(counter_path, content)
-    IO.puts("  Updated Counter module to version #{version}")
+    IO.puts("  Updated Counter module to version #{version} (protocol_v=#{protocol_version})")
   end
 
   defp deploy_cold do

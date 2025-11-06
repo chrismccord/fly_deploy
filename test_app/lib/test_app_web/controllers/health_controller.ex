@@ -9,7 +9,10 @@ defmodule TestAppWeb.HealthController do
       counter: %{
         count: counter_info.count,
         version: counter_info.version,
-        pid: inspect(counter_info.pid)
+        pid: inspect(counter_info.pid),
+        protocol_version: counter_info.protocol_version,
+        string_representation: counter_info.string_representation,
+        protocol_consolidated: counter_info.protocol_consolidated
       }
     })
   end
