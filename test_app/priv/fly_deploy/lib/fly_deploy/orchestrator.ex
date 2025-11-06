@@ -436,8 +436,7 @@ defmodule FlyDeploy.Orchestrator do
       |> Enum.map(fn {:ok, result} -> result end)
 
     # filter to only app modules for successful results
-    results
-    |> Enum.map(fn result ->
+    Enum.map(results, fn result ->
       if result.success do
         Map.update!(result, :module_names, fn modules -> filter_app_modules(modules, app) end)
       else

@@ -122,7 +122,9 @@ defmodule FlyDeploy.ReloadScript do
 
     # copy consolidated protocol beams
     IO.puts("Copying consolidated protocols...")
-    consolidated_files = Path.wildcard(Path.join([upgrade_dir, "releases", "*", "consolidated", "*.beam"]))
+
+    consolidated_files =
+      Path.wildcard(Path.join([upgrade_dir, "releases", "*", "consolidated", "*.beam"]))
 
     consolidated_copied_count =
       Enum.reduce(consolidated_files, 0, fn tarball_beam_path, acc ->
@@ -268,7 +270,9 @@ defmodule FlyDeploy.ReloadScript do
 
     # copy consolidated protocol beams
     IO.puts("Copying consolidated protocol beams...")
-    consolidated_files = Path.wildcard(Path.join([upgrade_dir, "releases", "*", "consolidated", "*.beam"]))
+
+    consolidated_files =
+      Path.wildcard(Path.join([upgrade_dir, "releases", "*", "consolidated", "*.beam"]))
 
     consolidated_copied_count =
       Enum.reduce(consolidated_files, 0, fn tarball_beam_path, acc ->

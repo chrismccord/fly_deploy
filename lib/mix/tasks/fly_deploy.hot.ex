@@ -10,6 +10,9 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
       # Use staging config
       mix fly_deploy.hot --config fly-staging.toml
 
+      # Pass Docker build arguments
+      mix fly_deploy.hot --build-arg ELIXIR_VERSION=1.18.2 --build-arg OTP_VERSION=27.1.2
+
       # Preview without executing
       mix fly_deploy.hot --dry-run
 
@@ -44,6 +47,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * `--config` - Path to fly.toml file (default: "fly.toml")
     * `--skip-build` - Skip building and use existing image (requires --image)
     * `--image` - Use specific pre-built image
+    * `--build-arg` - Pass build-time variables to Docker (can be used multiple times)
     * `--dry-run` - Show what would be done without executing
     * `--force` - Override deployment lock (use with caution)
     * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
@@ -89,6 +93,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           skip_build: :boolean,
           dry_run: :boolean,
           image: :string,
+          build_arg: :keep,
           max_concurrency: :integer,
           timeout: :integer,
           force: :boolean,
@@ -180,8 +185,17 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     IO.puts("")
   end
 
-  defp build_image(config, _opts) do
+  defp build_image(config, opts) do
     IO.puts(IO.ANSI.format([:yellow, "--> Building Docker image"]))
+
+    # Build args list for fly deploy
+    base_args = ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
+
+    # Add --build-arg flags if provided
+    build_args = Keyword.get_values(opts, :build_arg)
+    build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
+
+    all_args = base_args ++ build_arg_flags
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it
@@ -193,7 +207,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           :exit_status,
           :use_stdio,
           :stderr_to_stdout,
-          args: ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
+          args: all_args
         ]
       )
 

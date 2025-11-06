@@ -25,3 +25,6 @@ that changed and precomputing changes
 
 ## 0.1.8 (2025-09-06)
 - Ensure consolidated protocols are upgraded
+
+## 0.1.9 (2025-09-06)
+- Support --build-arg to pass to `fly deploy`
