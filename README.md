@@ -72,7 +72,7 @@ Compared to OTP's release_handler, FlyDeploy **cannot**:
 - **Upgrade the Erlang VM or OTP version** - VM version is fixed in the Docker image
 - **Handle multi-step upgrade paths with intermediate versions** - Each upgrade is standalone
 - **Upgrade NIFs or port drivers** - Native code requires a restart
-- **Guarantee specific module load ordering** - instead all changed OTP module pids are suspended ahead of `code_change`, code is upgraded, then all processses resume. There is no specific order of code change, but no intermediate processes resume until the entire upgrade is complete.
+- **Guarantee specific module load ordering** - instead all changed OTP module pids are suspended ahead of `code_change`, code is upgraded, then all processes resume. There is no specific order of code change, but no intermediate processes resume until the entire upgrade is complete.
 
 ### When to Use Each
 

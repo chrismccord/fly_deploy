@@ -10,7 +10,7 @@ defmodule FlyDeploy do
 
   FlyDeploy provides a simplified hot upgrade mechanism compared to OTP's `release_handler`.
   It is optimized for containerized deployments where most changes are code updates and the
-  occasional need for cold deploy is an accpetable tradeoff.
+  occasional need for cold deploy is an acceptable tradeoff.
 
   ### Not Supported
 
