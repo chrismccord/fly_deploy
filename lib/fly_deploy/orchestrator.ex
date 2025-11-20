@@ -559,34 +559,16 @@ defmodule FlyDeploy.Orchestrator do
               if success do
                 result
               else
-                error_parts = []
-
-                error_parts =
-                  if exit_code && exit_code != 0 do
-                    error_parts ++ ["exit_code=#{exit_code}"]
-                  else
-                    error_parts
-                  end
-
-                error_parts =
-                  if data["error"] do
-                    error_parts ++ [data["error"]]
-                  else
-                    error_parts
-                  end
-
-                error_parts =
-                  if stderr != "" do
-                    error_parts ++ ["stderr: #{String.slice(stderr, 0, 300)}"]
-                  else
-                    error_parts
-                  end
-
                 error_msg =
-                  if error_parts == [] do
-                    "Upgrade reported failure"
-                  else
-                    Enum.join(error_parts, ", ")
+                  [
+                    if(exit_code && exit_code != 0, do: "exit_code=#{exit_code}"),
+                    if(data["error"], do: data["error"]),
+                    if(stderr != "", do: "stderr: #{String.slice(stderr, 0, 300)}")
+                  ]
+                  |> Enum.reject(&is_nil/1)
+                  |> case do
+                    [] -> "Upgrade reported failure"
+                    parts -> Enum.join(parts, ", ")
                   end
 
                 Map.put(result, :error, error_msg)
@@ -602,37 +584,21 @@ defmodule FlyDeploy.Orchestrator do
           end
 
         nil ->
-          # Build detailed error with available info
-          error_parts = ["No JSON result marker found"]
-
-          error_parts =
-            if exit_code && exit_code != 0 do
-              error_parts ++ ["exit_code=#{exit_code}"]
-            else
-              error_parts
-            end
-
-          error_parts =
-            if stderr != "" do
-              truncated_stderr = String.slice(stderr, 0, 300)
-              error_parts ++ ["stderr: #{truncated_stderr}"]
-            else
-              error_parts
-            end
-
-          error_parts =
-            if stdout != "" do
-              truncated_stdout = String.slice(stdout, 0, 300)
-              error_parts ++ ["stdout: #{truncated_stdout}"]
-            else
-              error_parts ++ ["stdout: (empty)"]
-            end
+          error_msg =
+            [
+              "No JSON result marker found",
+              if(exit_code && exit_code != 0, do: "exit_code=#{exit_code}"),
+              if(stderr != "", do: "stderr: #{String.slice(stderr, 0, 300)}"),
+              if(stdout != "", do: "stdout: #{String.slice(stdout, 0, 300)}", else: "stdout: (empty)")
+            ]
+            |> Enum.reject(&is_nil/1)
+            |> Enum.join(", ")
 
           %{
             machine_id: machine_id,
             region: region,
             success: false,
-            error: Enum.join(error_parts, ", ")
+            error: error_msg
           }
       end
 
