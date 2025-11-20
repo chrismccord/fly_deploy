@@ -589,7 +589,10 @@ defmodule FlyDeploy.Orchestrator do
               "No JSON result marker found",
               if(exit_code && exit_code != 0, do: "exit_code=#{exit_code}"),
               if(stderr != "", do: "stderr: #{String.slice(stderr, 0, 300)}"),
-              if(stdout != "", do: "stdout: #{String.slice(stdout, 0, 300)}", else: "stdout: (empty)")
+              if(stdout != "",
+                do: "stdout: #{String.slice(stdout, 0, 300)}",
+                else: "stdout: (empty)"
+              )
             ]
             |> Enum.reject(&is_nil/1)
             |> Enum.join(", ")
