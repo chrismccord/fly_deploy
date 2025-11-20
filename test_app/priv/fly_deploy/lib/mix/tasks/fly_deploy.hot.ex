@@ -233,9 +233,6 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     deployment_id = extract_deployment_id(image_ref)
     IO.puts(IO.ANSI.format([:green, "    ✓ Built #{deployment_id}"]))
 
-    # Give the registry a moment to propagate
-    Process.sleep(3000)
-
     image_ref
   end
 
@@ -339,6 +336,11 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           eval_command
         ]
 
+    # Run with retry logic for registry propagation issues
+    run_orchestrator_with_retry(args, 3)
+  end
+
+  defp run_orchestrator_with_retry(args, retries_left) do
     {_output, exit_code} =
       System.cmd(
         "fly",
@@ -347,8 +349,17 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         stderr_to_stdout: true
       )
 
-    if exit_code != 0 do
-      Mix.raise("Orchestrator machine failed (exit #{exit_code})")
+    cond do
+      exit_code == 0 ->
+        :ok
+
+      retries_left > 0 ->
+        IO.puts(IO.ANSI.format([:yellow, "    ⚠ Image not yet available in registry, retrying..."]))
+        Process.sleep(3000)
+        run_orchestrator_with_retry(args, retries_left - 1)
+
+      true ->
+        Mix.raise("Orchestrator machine failed (exit #{exit_code})")
     end
   end
 end

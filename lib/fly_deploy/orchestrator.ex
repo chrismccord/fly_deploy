@@ -493,11 +493,13 @@ defmodule FlyDeploy.Orchestrator do
         parse_machine_result(machine_id, region, response.body)
 
       {:ok, response} ->
+        body_info = format_response_body(response.body)
+
         %{
           machine_id: machine_id,
           region: region,
           success: false,
-          error: "HTTP #{response.status}"
+          error: "HTTP #{response.status}: #{body_info}"
         }
 
       {:error, reason} ->
@@ -505,13 +507,32 @@ defmodule FlyDeploy.Orchestrator do
           machine_id: machine_id,
           region: region,
           success: false,
-          error: inspect(reason)
+          error: "Request failed: #{inspect(reason)}"
         }
     end
   end
 
+  defp format_response_body(body) when is_map(body) do
+    # Try to extract useful error info from response
+    cond do
+      body["error"] -> body["error"]
+      body["message"] -> body["message"]
+      true -> inspect(body) |> String.slice(0, 200)
+    end
+  end
+
+  defp format_response_body(body) when is_binary(body) do
+    String.slice(body, 0, 200)
+  end
+
+  defp format_response_body(body) do
+    inspect(body) |> String.slice(0, 200)
+  end
+
   defp parse_machine_result(machine_id, region, body) do
     stdout = body["stdout"] || ""
+    stderr = body["stderr"] || ""
+    exit_code = body["exit_code"]
 
     # Parse JSON result from output
     # Look for __FLY_DEPLOY_RESULT__<json>__FLY_DEPLOY_RESULT__
@@ -520,10 +541,12 @@ defmodule FlyDeploy.Orchestrator do
         [_, json_str] ->
           case JSON.decode(json_str) do
             {:ok, data} ->
-              %{
+              success = data["success"] && exit_code == 0
+
+              result = %{
                 machine_id: machine_id,
                 region: region,
-                success: data["success"] && body["exit_code"] == 0,
+                success: success,
                 modules: data["modules_reloaded"],
                 module_names: data["module_names"] || [],
                 processes_succeeded: data["processes_succeeded"],
@@ -532,21 +555,84 @@ defmodule FlyDeploy.Orchestrator do
                 suspend_duration_ms: data["suspend_duration_ms"]
               }
 
+              # Add error info if failed
+              if success do
+                result
+              else
+                error_parts = []
+
+                error_parts =
+                  if exit_code && exit_code != 0 do
+                    error_parts ++ ["exit_code=#{exit_code}"]
+                  else
+                    error_parts
+                  end
+
+                error_parts =
+                  if data["error"] do
+                    error_parts ++ [data["error"]]
+                  else
+                    error_parts
+                  end
+
+                error_parts =
+                  if stderr != "" do
+                    error_parts ++ ["stderr: #{String.slice(stderr, 0, 300)}"]
+                  else
+                    error_parts
+                  end
+
+                error_msg =
+                  if error_parts == [] do
+                    "Upgrade reported failure"
+                  else
+                    Enum.join(error_parts, ", ")
+                  end
+
+                Map.put(result, :error, error_msg)
+              end
+
             {:error, reason} ->
               %{
                 machine_id: machine_id,
                 region: region,
                 success: false,
-                error: "Failed to decode JSON: #{inspect(reason)}"
+                error: "Failed to decode JSON: #{inspect(reason)}, exit_code=#{exit_code}"
               }
           end
 
         nil ->
+          # Build detailed error with available info
+          error_parts = ["No JSON result marker found"]
+
+          error_parts =
+            if exit_code && exit_code != 0 do
+              error_parts ++ ["exit_code=#{exit_code}"]
+            else
+              error_parts
+            end
+
+          error_parts =
+            if stderr != "" do
+              truncated_stderr = String.slice(stderr, 0, 300)
+              error_parts ++ ["stderr: #{truncated_stderr}"]
+            else
+              error_parts
+            end
+
+          error_parts =
+            if stdout != "" do
+              truncated_stdout = String.slice(stdout, 0, 300)
+              error_parts ++ ["stdout: #{truncated_stdout}"]
+            else
+              error_parts ++ ["stdout: (empty)"]
+            end
+
           %{
             machine_id: machine_id,
             region: region,
             success: false,
-            error: "No JSON result found in output"
+            error: Enum.join(error_parts, ", ")
           }
       end
 
