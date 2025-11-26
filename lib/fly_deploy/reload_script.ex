@@ -147,6 +147,16 @@ defmodule FlyDeploy.ReloadScript do
 
     IO.puts("  ✓ Copied #{consolidated_copied_count} consolidated protocol beams")
 
+    # copy static assets (priv/static)
+    IO.puts("Copying static assets...")
+    static_copied_count = copy_static_assets(upgrade_dir, app)
+    IO.puts("  ✓ Copied #{static_copied_count} static files")
+
+    # reset Phoenix static cache if static files were copied
+    if static_copied_count > 0 do
+      reset_static_cache(app)
+    end
+
     IO.puts("Performing safe hot upgrade...")
 
     # perform the 4-phase upgrade
@@ -293,6 +303,25 @@ defmodule FlyDeploy.ReloadScript do
       end)
 
     IO.puts("  ✓ Copied #{consolidated_copied_count} consolidated protocol beams")
+
+    # copy static assets (priv/static)
+    IO.puts("Copying static assets...")
+    static_copied_count = copy_static_assets(upgrade_dir, app)
+    IO.puts("  ✓ Copied #{static_copied_count} static files")
+
+    # reset Phoenix static cache if static files were copied
+    # Note: On startup, the endpoint may not be fully started yet,
+    # so we wrap in try/rescue - the fresh boot will load the new manifest anyway
+    if static_copied_count > 0 do
+      try do
+        reset_static_cache(app)
+      rescue
+        e ->
+          Logger.warning(
+            "[#{inspect(__MODULE__)}] Could not reset static cache (endpoint may not be started yet): #{Exception.message(e)}"
+          )
+      end
+    end
 
     # use :c.lm() to load modified modules (purges old code and loads new)
     IO.puts("Loading modified modules...")
@@ -567,6 +596,47 @@ defmodule FlyDeploy.ReloadScript do
           :code.purge(module_name)
           :code.load_file(module_name)
         end)
+    end
+  end
+
+  defp copy_static_assets(upgrade_dir, app) do
+    # Find static files in the extracted tarball
+    # Path format: <upgrade_dir>/lib/<app>-<version>/priv/static/**/*
+    static_files =
+      Path.wildcard(Path.join([upgrade_dir, "lib", "#{app}-*", "priv", "static", "**", "*"]))
+      |> Enum.filter(&File.regular?/1)
+
+    Enum.reduce(static_files, 0, fn src_path, acc ->
+      # Extract relative path from upgrade_dir
+      # e.g., lib/test_app-0.1.0/priv/static/assets/app.css
+      rel_path = String.replace_prefix(src_path, upgrade_dir <> "/", "")
+
+      # Target path on the running system
+      dest_path = Path.join("/app", rel_path)
+
+      # Ensure target directory exists
+      dest_dir = Path.dirname(dest_path)
+      File.mkdir_p!(dest_dir)
+      File.cp!(src_path, dest_path)
+      acc + 1
+    end)
+  end
+
+  defp reset_static_cache(app) do
+    # Get the application module (e.g., MyApp.Application)
+    case Application.spec(app, :mod) do
+      {app_module, _args} ->
+        # Call config_change/3 to trigger Phoenix endpoint cache reset
+        if function_exported?(app_module, :config_change, 3) do
+          Logger.info("[#{inspect(__MODULE__)}] Resetting static cache via #{app_module}.config_change/3")
+          app_module.config_change([], [], [])
+          IO.puts("  ✓ Static cache reset")
+        else
+          Logger.info("[#{inspect(__MODULE__)}] No config_change/3 exported by #{app_module}")
+        end
+
+      nil ->
+        Logger.info("[#{inspect(__MODULE__)}] No application module found for #{app}")
     end
   end
 

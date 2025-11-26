@@ -264,7 +264,12 @@ defmodule FlyDeploy.Orchestrator do
     beam_files = Path.wildcard("/app/lib/**/ebin/*.beam")
     consolidated_files = Path.wildcard("/app/releases/*/consolidated/*.beam")
 
-    all_files = beam_files ++ consolidated_files
+    # find static assets (priv/static including cache_manifest.json)
+    static_files =
+      Path.wildcard("/app/lib/#{app}-*/priv/static/**/*")
+      |> Enum.filter(&File.regular?/1)
+
+    all_files = beam_files ++ consolidated_files ++ static_files
 
     # create tar
     files_to_tar =
@@ -279,14 +284,17 @@ defmodule FlyDeploy.Orchestrator do
     tarball_size = File.stat!(tarball_path).size
     size_mb = Float.round(tarball_size / 1_048_576, 1)
 
+    static_count = length(static_files)
+    static_info = if static_count > 0, do: " + #{static_count} static files", else: ""
+
     IO.puts(
       ansi(
         [:green],
-        "    ✓ Created #{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols (#{size_mb} MB)"
+        "    ✓ Created #{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols#{static_info} (#{size_mb} MB)"
       )
     )
 
-    {tarball_path, %{modules: length(all_files), size_bytes: tarball_size}}
+    {tarball_path, %{modules: length(beam_files), static_files: static_count, size_bytes: tarball_size}}
   end
 
   defp upload_to_tigris(tarball_path, app, version, bucket) do

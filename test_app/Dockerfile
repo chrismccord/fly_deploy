@@ -55,6 +55,9 @@ COPY lib lib
 # Compile the release
 RUN mix compile
 
+# Digest static assets (generates fingerprinted files and cache_manifest.json)
+RUN mix phx.digest
+
 # Changes to config/runtime.exs don't require recompiling the code
 COPY config/runtime.exs config/
 
