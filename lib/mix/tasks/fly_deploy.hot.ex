@@ -328,7 +328,10 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         "sleep",
         "inf",
         "-c",
-        config.fly_config
+        config.fly_config,
+        # Give orchestrator enough memory for large tarballs (default is 256MB)
+        "--vm-memory",
+        "1024"
       ] ++
         env_flags ++
         config_env_flags ++
@@ -357,7 +360,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
       retries_left > 0 ->
         IO.puts(
-          IO.ANSI.format([:yellow, "    ⚠ Image not yet available in registry, retrying..."])
+          IO.ANSI.format([:yellow, "    ⚠ Orchestrator failed, retrying..."])
         )
 
         Process.sleep(3000)

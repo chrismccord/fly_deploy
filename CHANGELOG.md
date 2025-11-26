@@ -1,3 +1,6 @@
+## 0.1.12 (2025-11-25)
+- Launch orchestrator with more memory beyond 256mb default to avoid OOMs
+
 ## 0.1.11 (2025-11-25)
 - Ship static assets and recache manifest on upgrade
 
