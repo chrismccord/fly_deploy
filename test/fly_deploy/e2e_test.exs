@@ -68,6 +68,7 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("Step 1: Deploying initial version (v1)...")
     ensure_health_controller_version("v1")
     update_counter_module("v1")
+    update_static_assets("v1")
     deploy_cold()
     wait_for_deployment()
     assert_health_response(app_url, "ok-v1")
@@ -119,10 +120,17 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("  Before hot upgrade - String.Chars MD5: #{v1_md5}")
     IO.puts("✓ Recorded v1 consolidated protocol MD5\n")
 
+    # Step 2b: Record v1 static asset hash before hot upgrade
+    IO.puts("Step 2b: Recording v1 static asset hash...")
+    v1_css_hash = get_static_asset_hash(machine_id, app_url)
+    IO.puts("  Before hot upgrade - app.css content hash: #{v1_css_hash}")
+    IO.puts("✓ Recorded v1 static asset hash\n")
+
     # Step 3: Perform hot upgrade to v2
     IO.puts("Step 3: Performing hot upgrade to v2...")
     update_health_controller_version("v2")
     update_counter_module("v2")
+    update_static_assets("v2")
     _hot_upgrade_output = deploy_hot()
     wait_for_deployment()
 
@@ -213,6 +221,17 @@ defmodule FlyDeploy.E2ETest do
       "✓ VERIFIED: Consolidated protocol beam file was copied (MD5 changed from v1 to v2)\n"
     )
 
+    # Step 4c: Verify static assets were updated
+    IO.puts("Step 4c: Verifying static assets were updated...")
+    v2_css_hash = get_static_asset_hash(machine_id, app_url)
+    IO.puts("  After hot upgrade - app.css content hash: #{v2_css_hash}")
+    IO.puts("  Hash changed: #{v1_css_hash != v2_css_hash}")
+
+    assert v1_css_hash != v2_css_hash,
+           "Static asset hash must change after hot upgrade. V1: #{v1_css_hash}, V2: #{v2_css_hash}"
+
+    IO.puts("✓ VERIFIED: Static assets were updated (hash changed from v1 to v2)\n")
+
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
     restart_all_machines()
@@ -252,6 +271,7 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("Step 7: Cold deploying v3 to verify hot upgrade is not reapplied...")
     update_health_controller_version("v3")
     update_counter_module("v3")
+    update_static_assets("v3")
     deploy_cold()
     wait_for_deployment()
     IO.puts("✓ Cold deployed v3\n")
@@ -627,5 +647,73 @@ defmodule FlyDeploy.E2ETest do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp update_static_assets(version) do
+    css_path = Path.join(@test_app_dir, "priv/static/css/app.css")
+
+    content = """
+    /* Test App CSS - #{version} */
+    body {
+      font-family: sans-serif;
+      background: #ffffff;
+    }
+
+    .version-marker {
+      content: "#{version}";
+    }
+
+    /* Version-specific style to ensure content differs */
+    .#{version}-only {
+      display: block;
+    }
+    """
+
+    File.write!(css_path, content)
+    IO.puts("  Updated static assets to #{version}")
+  end
+
+  defp get_static_asset_hash(machine_id, app_url) do
+    # First, try to fetch the CSS directly via HTTP and hash its content
+    # This tests the full path: static files served by Phoenix endpoint
+    css_url = "#{app_url}/css/app.css"
+
+    case Req.get(css_url, redirect: true, max_redirects: 5) do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        :crypto.hash(:md5, body) |> Base.encode16()
+
+      {:ok, %{status: status}} ->
+        # If HTTP fetch fails, fall back to checking file on disk via SSH
+        IO.puts("    (HTTP fetch returned #{status}, falling back to SSH)")
+        get_static_asset_hash_via_ssh(machine_id)
+
+      {:error, _reason} ->
+        # Fall back to SSH
+        IO.puts("    (HTTP fetch failed, falling back to SSH)")
+        get_static_asset_hash_via_ssh(machine_id)
+    end
+  end
+
+  defp get_static_asset_hash_via_ssh(machine_id) do
+    # Get the MD5 of the CSS file on disk
+    {output, _} =
+      System.cmd(
+        "fly",
+        [
+          "ssh",
+          "console",
+          "-a",
+          @app_name,
+          "--machine",
+          machine_id,
+          "-C",
+          "/app/bin/test_app eval 'css_files = Path.wildcard(\"/app/lib/test_app-*/priv/static/css/app*.css\"); content = Enum.map_join(css_files, &File.read!/1); md5 = :crypto.hash(:md5, content) |> Base.encode16(); IO.puts(Jason.encode!(%{md5: md5}))'"
+        ],
+        cd: @test_app_dir
+      )
+
+    json_line = output |> String.split("\n") |> Enum.find("", &String.starts_with?(&1, "{"))
+    result = Jason.decode!(json_line)
+    result["md5"]
   end
 end
