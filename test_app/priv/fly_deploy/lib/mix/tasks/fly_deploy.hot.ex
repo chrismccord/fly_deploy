@@ -84,6 +84,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
   @shortdoc "Hot code upgrade without restarting"
 
+  @max_orchestrator_launch_retries 5
+
   @impl Mix.Task
   def run(args) do
     {opts, _remaining, _invalid} =
@@ -337,7 +339,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         ]
 
     # Run with retry logic for registry propagation issues
-    run_orchestrator_with_retry(args, 3)
+    run_orchestrator_with_retry(args, @max_orchestrator_launch_retries)
   end
 
   defp run_orchestrator_with_retry(args, retries_left) do

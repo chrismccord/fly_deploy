@@ -628,7 +628,10 @@ defmodule FlyDeploy.ReloadScript do
       {app_module, _args} ->
         # Call config_change/3 to trigger Phoenix endpoint cache reset
         if function_exported?(app_module, :config_change, 3) do
-          Logger.info("[#{inspect(__MODULE__)}] Resetting static cache via #{app_module}.config_change/3")
+          Logger.info(
+            "[#{inspect(__MODULE__)}] Resetting static cache via #{app_module}.config_change/3"
+          )
+
           app_module.config_change([], [], [])
           IO.puts("  ✓ Static cache reset")
         else
