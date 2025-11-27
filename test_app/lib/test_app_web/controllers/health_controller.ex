@@ -6,13 +6,14 @@ defmodule TestAppWeb.HealthController do
 
     json(conn, %{
       status: "ok-v3",
+      components_defined: Code.ensure_loaded?(FlyDeploy.Components),
       counter: %{
         count: counter_info.count,
         version: counter_info.version,
         pid: inspect(counter_info.pid),
         protocol_version: counter_info.protocol_version,
         string_representation: counter_info.string_representation,
-        protocol_consolidated: counter_info.protocol_consolidated
+        protocol_consolidated: counter_info.protocol_consolidated,
       }
     })
   end

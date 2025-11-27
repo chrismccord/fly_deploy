@@ -71,7 +71,9 @@ defmodule FlyDeploy.E2ETest do
     update_static_assets("v1")
     deploy_cold()
     wait_for_deployment()
-    assert_health_response(app_url, "ok-v1")
+    health = assert_health_response(app_url, "ok-v1")
+    # components are defined since test_app depends on optional phoenix_live_view
+    assert health["components_defined"] == true
     IO.puts("✓ Initial deployment successful (v1)\n")
 
     # Step 2: Increment counter and capture state before upgrade
@@ -309,13 +311,14 @@ defmodule FlyDeploy.E2ETest do
 
         json(conn, %{
           status: "ok-#{version}",
+          components_defined: Code.ensure_loaded?(FlyDeploy.Components),
           counter: %{
             count: counter_info.count,
             version: counter_info.version,
             pid: inspect(counter_info.pid),
             protocol_version: counter_info.protocol_version,
             string_representation: counter_info.string_representation,
-            protocol_consolidated: counter_info.protocol_consolidated
+            protocol_consolidated: counter_info.protocol_consolidated,
           }
         })
       end
@@ -597,10 +600,10 @@ defmodule FlyDeploy.E2ETest do
     result =
       Enum.reduce_while(1..10, nil, fn attempt, _acc ->
         case fetch_health(health_url) do
-          {:ok, ^expected_status} ->
-            {:halt, :ok}
+          {:ok, %{"status" => ^expected_status} = body} ->
+            {:halt, {:ok, body}}
 
-          {:ok, other_status} ->
+          {:ok, %{"status" => other_status} = _body} ->
             IO.puts(
               "  ⚠️  Attempt #{attempt}/10: Got status '#{other_status}', expected '#{expected_status}'"
             )
@@ -625,8 +628,9 @@ defmodule FlyDeploy.E2ETest do
       end)
 
     case result do
-      :ok ->
+      {:ok, body} ->
         IO.puts("  ✓ Health check returned '#{expected_status}'")
+        body
 
       {:error, :wrong_status, got_status} ->
         flunk("Health check returned '#{got_status}' but expected '#{expected_status}'")
@@ -639,7 +643,7 @@ defmodule FlyDeploy.E2ETest do
   defp fetch_health(url) do
     case Req.get(url) do
       {:ok, %{status: 200, body: body}} when is_map(body) ->
-        {:ok, body["status"]}
+        {:ok, body}
 
       {:ok, %{status: status}} ->
         {:error, {:unexpected_status, status}}

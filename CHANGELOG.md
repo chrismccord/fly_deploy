@@ -1,3 +1,7 @@
+## 0.1.13 (2025-11-26)
+- Add `<FlyDeploy.Components.hot_reload_css socket={@socket} asset="app.css" />` when using LiveView
+  to render a hidden element that triggers CSS hot reload when static assets change on hot deploy.
+
 ## 0.1.12 (2025-11-25)
 - Launch orchestrator with more memory beyond 256mb default to avoid OOMs
 

@@ -294,7 +294,8 @@ defmodule FlyDeploy.Orchestrator do
       )
     )
 
-    {tarball_path, %{modules: length(beam_files), static_files: static_count, size_bytes: tarball_size}}
+    {tarball_path,
+     %{modules: length(beam_files), static_files: static_count, size_bytes: tarball_size}}
   end
 
   defp upload_to_tigris(tarball_path, app, version, bucket) do

@@ -359,9 +359,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         :ok
 
       retries_left > 0 ->
-        IO.puts(
-          IO.ANSI.format([:yellow, "    ⚠ Orchestrator failed, retrying..."])
-        )
+        IO.puts(IO.ANSI.format([:yellow, "    ⚠ Orchestrator failed, retrying..."]))
 
         Process.sleep(3000)
         run_orchestrator_with_retry(args, retries_left - 1)
