@@ -289,6 +289,30 @@ If you're using Phoenix LiveView, FlyDeploy automatically triggers re-renders af
 - Sends `{:phoenix_live_reload, "fly_deploy", source_path}` messages directly to each LiveView PID
 - LiveView automatically re-renders with the new code
 
+### CSS Hot Reload
+
+When static assets like CSS change during a hot upgrade, users would normally need to hard refresh to see the new styles. The `hot_reload_css` component automatically reloads stylesheets when the static manifest changes.
+
+Add to your app layout (e.g., `app.html.heex`):
+
+```heex
+<FlyDeploy.Components.hot_reload_css socket={@socket} />
+```
+
+For multiple stylesheets, specify the asset name:
+
+```heex
+<FlyDeploy.Components.hot_reload_css socket={@socket} asset="app.css" />
+<FlyDeploy.Components.hot_reload_css socket={@socket} asset="admin.css" />
+```
+
+**Requirements:**
+- Phoenix LiveView 1.1+ with colocated hooks support
+- Static assets digested via `mix phx.digest` (standard for production)
+- `cache_static_manifest` configured in your endpoint
+
+The component uses a colocated JavaScript hook that detects when the static manifest version changes and automatically updates stylesheet hrefs, preserving any CDN/static host configuration.
+
 ## Rollback Strategy
 
 Hot upgrades are forward-only. Once new code is loaded into the BEAM VM, `FlyDeploy` cannot roll it back. If a hot upgrade causes issues, perform a cold deploy to a known good version:
