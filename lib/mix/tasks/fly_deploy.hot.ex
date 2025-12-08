@@ -294,7 +294,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         ["-e", "DEPLOY_LOCKED_BY=#{locked_by}"],
         ["-e", "DEPLOY_VERSION=#{config.version}"],
         ["-e", "DEPLOY_MAX_CONCURRENCY=#{config.max_concurrency}"],
-        ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"]
+        ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"],
+        ["-e", "DEPLOY_SUSPEND_TIMEOUT=#{config.suspend_timeout}"]
       ] ++
         if opts[:force] do
           [["-e", "DEPLOY_FORCE=true"]]

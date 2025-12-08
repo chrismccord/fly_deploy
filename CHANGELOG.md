@@ -1,3 +1,6 @@
+## 0.1.14 (2025-12-06)
+- Add `:suspend_timeout` configuration and catch timeouts from `:sys.suspend` when process time out suspending
+
 ## 0.1.13 (2025-11-26)
 - Add `<FlyDeploy.Components.hot_reload_css socket={@socket} asset="app.css" />` when using LiveView
   to render a hidden element that triggers CSS hot reload when static assets change on hot deploy.

@@ -265,6 +265,8 @@ defmodule FlyDeploy do
 
   - `tarball_url` - S3 URL of the tarball containing new beam files
   - `app` - OTP application name
+  - `opts` - Options (optional)
+    - `:suspend_timeout` - Timeout in ms for suspending each process (default: 10_000)
 
   ## Process
 
@@ -281,8 +283,8 @@ defmodule FlyDeploy do
   - State is preserved via `code_change/3` callbacks
   - Errors are caught and logged without crashing
   """
-  def hot_upgrade(tarball_url, app) do
-    FlyDeploy.ReloadScript.hot_upgrade(tarball_url, app)
+  def hot_upgrade(tarball_url, app, opts \\ []) do
+    FlyDeploy.ReloadScript.hot_upgrade(tarball_url, app, opts)
   end
 
   @doc """

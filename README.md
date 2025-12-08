@@ -219,7 +219,8 @@ In `config/config.exs`:
 ```elixir
 config :fly_deploy,
   bucket: "my-custom-bucket",  # Optional - defaults to BUCKET_NAME env var
-  max_concurrency: 10,
+  max_concurrency: 10,         # Max concurrent machine upgrades (default: 20)
+  suspend_timeout: 15_000,     # Timeout for suspending each process in ms (default: 10_000)
   env: %{
     "CUSTOM_VAR" => "value"
   }

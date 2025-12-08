@@ -23,10 +23,14 @@ defmodule FlyDeploy.ReloadScript do
   Normal hot upgrade on a running system.
 
   Uses suspend/resume for safe process upgrades.
+
+  ## Options
+
+    * `:suspend_timeout` - Timeout in ms for suspending each process (default: 10_000)
   """
-  def hot_upgrade(tarball_url, app) do
+  def hot_upgrade(tarball_url, app, opts \\ []) do
     try do
-      do_hot_upgrade(tarball_url, app)
+      do_hot_upgrade(tarball_url, app, opts)
     rescue
       e ->
         # report error back via JSON for debugging
@@ -44,7 +48,7 @@ defmodule FlyDeploy.ReloadScript do
     end
   end
 
-  defp do_hot_upgrade(tarball_url, app) do
+  defp do_hot_upgrade(tarball_url, app, opts) do
     IO.puts("Downloading tarball from #{tarball_url}...")
     {:ok, _} = Application.ensure_all_started(:req)
 
@@ -160,7 +164,7 @@ defmodule FlyDeploy.ReloadScript do
     IO.puts("Performing safe hot upgrade...")
 
     # perform the 4-phase upgrade
-    result = safe_upgrade_application(app)
+    result = safe_upgrade_application(app, opts)
 
     IO.puts("  Modules reloaded: #{result.modules_reloaded}")
 
@@ -341,8 +345,9 @@ defmodule FlyDeploy.ReloadScript do
   # - `processes_succeeded` - Number of processes successfully upgraded
   # - `processes_failed` - Number of processes that failed to upgrade
   # - `processes_skipped` - Number of processes skipped (not GenServer/proc_lib)
-  defp safe_upgrade_application(app) do
+  defp safe_upgrade_application(app, opts) do
     Logger.info("[#{inspect(__MODULE__)}] Starting safe upgrade for #{app}")
+    suspend_timeout = Keyword.get(opts, :suspend_timeout, 10_000)
 
     # detect changed modules
     changed_modules = :code.modified_modules()
@@ -359,13 +364,13 @@ defmodule FlyDeploy.ReloadScript do
     suspended_processes =
       Enum.map(processes, fn {pid, module} ->
         try do
-          :sys.suspend(pid)
+          :sys.suspend(pid, suspend_timeout)
           Logger.info("[#{inspect(__MODULE__)}] Suspended process #{inspect(pid)} (#{module})")
           {:ok, pid, module}
-        rescue
-          e ->
-            Logger.error(
-              "[#{inspect(__MODULE__)}] Failed to suspend process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
+        catch
+          :exit, reason ->
+            Logger.warning(
+              "[#{inspect(__MODULE__)}] Failed to suspend process #{inspect(pid)} (#{module}): #{inspect(reason)} - skipping"
             )
 
             {:error, pid, module}

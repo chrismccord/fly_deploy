@@ -31,6 +31,7 @@ defmodule FlyDeploy.Orchestrator do
     version = System.get_env("DEPLOY_VERSION")
     max_concurrency = String.to_integer(System.get_env("DEPLOY_MAX_CONCURRENCY", "20"))
     timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", "60000"))
+    suspend_timeout = String.to_integer(System.get_env("DEPLOY_SUSPEND_TIMEOUT", "10000"))
 
     # track start time
     start_time = System.monotonic_time(:millisecond)
@@ -49,7 +50,7 @@ defmodule FlyDeploy.Orchestrator do
       update_current_state_with_hot_upgrade(url, app, image_ref, version, bucket)
 
       # step 4: Trigger reload on all machines
-      results = trigger_machine_reloads(url, app, max_concurrency, timeout)
+      results = trigger_machine_reloads(url, app, max_concurrency, timeout, suspend_timeout)
 
       duration = System.monotonic_time(:millisecond) - start_time
 
@@ -400,7 +401,7 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
-  defp trigger_machine_reloads(tarball_url, app, max_concurrency, timeout) do
+  defp trigger_machine_reloads(tarball_url, app, max_concurrency, timeout, suspend_timeout) do
     IO.puts(ansi([:yellow], "--> Upgrading machines"))
 
     # get machines from Fly API
@@ -437,7 +438,7 @@ defmodule FlyDeploy.Orchestrator do
       Task.async_stream(
         machines,
         fn machine ->
-          reload_machine(machine["id"], machine["region"], tarball_url, app)
+          reload_machine(machine["id"], machine["region"], tarball_url, app, suspend_timeout)
         end,
         timeout: timeout,
         max_concurrency: max_concurrency
@@ -471,7 +472,7 @@ defmodule FlyDeploy.Orchestrator do
     end)
   end
 
-  defp reload_machine(machine_id, region, tarball_url, app) do
+  defp reload_machine(machine_id, region, tarball_url, app, suspend_timeout) do
     app_name = System.fetch_env!("FLY_APP_NAME")
     api_token = System.fetch_env!("FLY_API_TOKEN")
 
@@ -481,7 +482,7 @@ defmodule FlyDeploy.Orchestrator do
 
     # call the FlyDeploy.hot_upgrade function directly via RPC
     command =
-      "/app/bin/#{binary_name} rpc \"FlyDeploy.hot_upgrade(\\\"#{tarball_url}\\\", :#{app})\""
+      "/app/bin/#{binary_name} rpc \"FlyDeploy.hot_upgrade(\\\"#{tarball_url}\\\", :#{app}, suspend_timeout: #{suspend_timeout})\""
 
     result =
       Req.post(url,

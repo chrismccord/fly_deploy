@@ -66,6 +66,7 @@ defmodule FlyDeploy.Config do
     :env,
     :max_concurrency,
     :timeout,
+    :suspend_timeout,
     :version
   ]
 
@@ -77,6 +78,7 @@ defmodule FlyDeploy.Config do
           env: %{String.t() => String.t()},
           max_concurrency: pos_integer(),
           timeout: pos_integer(),
+          suspend_timeout: pos_integer(),
           version: String.t()
         }
 
@@ -134,6 +136,7 @@ defmodule FlyDeploy.Config do
       env: %{},
       max_concurrency: 20,
       timeout: 60_000,
+      suspend_timeout: 10_000,
       version: get_app_version(otp_app)
     }
   end
