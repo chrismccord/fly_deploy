@@ -315,7 +315,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     eval_command =
       "/app/bin/#{config.binary_name} eval 'FlyDeploy.orchestrate(app: :#{config.otp_app}, image_ref: \"#{image_ref}\")'"
 
-    # Spawn orchestrator machine with the NEW image
+    # Spawn orchestrator machine with the new image
     # The fly CLI automatically:
     # - Reads app name from fly.toml via -c flag
     # - Passes app secrets (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc)

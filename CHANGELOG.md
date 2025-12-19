@@ -1,3 +1,6 @@
+## 0.1.15 (2025-12-19)
+- Fix new module code not being loaded on upgrades
+
 ## 0.1.14 (2025-12-06)
 - Add `:suspend_timeout` configuration and catch timeouts from `:sys.suspend` when process time out suspending
 

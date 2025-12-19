@@ -98,30 +98,63 @@ defmodule FlyDeploy.ReloadScript do
       "  Found #{length(beam_files)} app beam files to check (#{length(all_beam_files)} total)"
     )
 
-    copied_count =
-      Enum.reduce(beam_files, 0, fn tarball_beam_path, acc ->
+    # Get the app's ebin directory for new modules
+    app_ebin_dir = Path.join(Application.app_dir(app), "ebin")
+
+    {copied_count, new_modules} =
+      Enum.reduce(beam_files, {0, []}, fn tarball_beam_path, {count, new_mods} ->
         beam_filename = Path.basename(tarball_beam_path)
         module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
 
         case :code.which(module_name) do
           path when is_list(path) ->
+            # Existing module - copy to the loaded path
             loaded_path = List.to_string(path)
 
             # Compare MD5s to avoid unnecessary copies
             if beam_file_changed?(tarball_beam_path, module_name) do
               File.cp!(tarball_beam_path, loaded_path)
-              acc + 1
+              {count + 1, new_mods}
             else
-              acc
+              {count, new_mods}
             end
 
           _ ->
-            acc
+            # new module - copy to app's ebin directory and track for explicit loading
+            # In embedded mode (OTP releases), modules are NOT auto-loaded on demand
+            dest_path = Path.join(app_ebin_dir, beam_filename)
+            File.cp!(tarball_beam_path, dest_path)
+
+            Logger.info(
+              "[#{inspect(__MODULE__)}] Copied new module: #{module_name} -> #{dest_path}"
+            )
+
+            {count + 1, [{module_name, dest_path} | new_mods]}
         end
       end)
 
+    # Explicitly load new modules - required in embedded mode (OTP releases)
+    # where modules are NOT auto-loaded on demand
+    if length(new_modules) > 0 do
+      IO.puts("  Loading #{length(new_modules)} new modules (embedded mode)...")
+
+      Enum.each(new_modules, fn {module_name, beam_path} ->
+        beam_binary = File.read!(beam_path)
+
+        case :code.load_binary(module_name, ~c"#{beam_path}", beam_binary) do
+          {:module, ^module_name} ->
+            Logger.info("[#{inspect(__MODULE__)}] Loaded new module: #{module_name}")
+
+          {:error, reason} ->
+            Logger.error(
+              "[#{inspect(__MODULE__)}] Failed to load #{module_name}: #{inspect(reason)}"
+            )
+        end
+      end)
+    end
+
     IO.puts(
-      "  ✓ Copied #{copied_count} changed beam files (skipped #{length(beam_files) - copied_count} unchanged)"
+      "  ✓ Copied #{copied_count} beam files (#{length(new_modules)} new, #{copied_count - length(new_modules)} changed)"
     )
 
     # copy consolidated protocol beams
@@ -256,8 +289,11 @@ defmodule FlyDeploy.ReloadScript do
       "  Found #{length(beam_files)} app beam files to check (#{length(all_beam_files)} total)"
     )
 
-    copied_count =
-      Enum.reduce(beam_files, 0, fn tarball_beam_path, acc ->
+    # Get the app's ebin directory for new modules
+    app_ebin_dir = Path.join(Application.app_dir(app), "ebin")
+
+    {copied_count, new_modules} =
+      Enum.reduce(beam_files, {0, []}, fn tarball_beam_path, {count, new_mods} ->
         beam_filename = Path.basename(tarball_beam_path)
         module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
 
@@ -268,18 +304,45 @@ defmodule FlyDeploy.ReloadScript do
             # Compare MD5s to avoid unnecessary copies
             if beam_file_changed?(tarball_beam_path, module_name) do
               File.cp!(tarball_beam_path, loaded_path)
-              acc + 1
+              {count + 1, new_mods}
             else
-              acc
+              {count, new_mods}
             end
 
           _ ->
-            acc
+            # new module - copy to app's ebin directory and track for explicit loading
+            dest_path = Path.join(app_ebin_dir, beam_filename)
+            File.cp!(tarball_beam_path, dest_path)
+
+            Logger.info(
+              "[#{inspect(__MODULE__)}] Copied new module: #{module_name} -> #{dest_path}"
+            )
+
+            {count + 1, [{module_name, dest_path} | new_mods]}
         end
       end)
 
+    # Explicitly load new modules - required in embedded mode (OTP releases)
+    if length(new_modules) > 0 do
+      IO.puts("  Loading #{length(new_modules)} new modules (embedded mode)...")
+
+      Enum.each(new_modules, fn {module_name, beam_path} ->
+        beam_binary = File.read!(beam_path)
+
+        case :code.load_binary(module_name, ~c"#{beam_path}", beam_binary) do
+          {:module, ^module_name} ->
+            Logger.info("[#{inspect(__MODULE__)}] Loaded new module: #{module_name}")
+
+          {:error, reason} ->
+            Logger.error(
+              "[#{inspect(__MODULE__)}] Failed to load #{module_name}: #{inspect(reason)}"
+            )
+        end
+      end)
+    end
+
     IO.puts(
-      "  ✓ Copied #{copied_count} changed beam files (skipped #{length(beam_files) - copied_count} unchanged)"
+      "  ✓ Copied #{copied_count} beam files (#{length(new_modules)} new, #{copied_count - length(new_modules)} changed)"
     )
 
     # copy consolidated protocol beams
@@ -327,9 +390,24 @@ defmodule FlyDeploy.ReloadScript do
       end
     end
 
-    # use :c.lm() to load modified modules (purges old code and loads new)
+    # Load modified modules using load_binary for embedded mode compatibility
     IO.puts("Loading modified modules...")
-    modified_modules = :c.lm()
+    modified_modules = :code.modified_modules()
+
+    Enum.each(modified_modules, fn module ->
+      :code.purge(module)
+
+      case :code.which(module) do
+        path when is_list(path) ->
+          beam_path = List.to_string(path)
+          beam_binary = File.read!(beam_path)
+          :code.load_binary(module, path, beam_binary)
+          Logger.info("[#{inspect(__MODULE__)}] Reloaded module: #{module}")
+
+        _ ->
+          Logger.warning("[#{inspect(__MODULE__)}] Could not find path for module: #{module}")
+      end
+    end)
 
     IO.puts(
       "  ✓ Loaded #{length(modified_modules)} modified modules: #{inspect(modified_modules)}"
@@ -389,10 +467,22 @@ defmodule FlyDeploy.ReloadScript do
     Logger.info("[#{inspect(__MODULE__)}] Phase 2: Reloading all modules...")
 
     # reload regular changed modules
+    # Use load_binary instead of load_file for reliability in embedded mode
     Enum.each(changed_modules, fn module ->
       Logger.info("[#{inspect(__MODULE__)}] Reloading module: #{module}")
       :code.purge(module)
-      {:module, ^module} = :code.load_file(module)
+
+      # Get the beam path and load via binary for embedded mode compatibility
+      case :code.which(module) do
+        path when is_list(path) ->
+          beam_path = List.to_string(path)
+          beam_binary = File.read!(beam_path)
+          {:module, ^module} = :code.load_binary(module, path, beam_binary)
+
+        _ ->
+          # Fallback to load_file if path unknown (shouldn't happen for changed modules)
+          {:module, ^module} = :code.load_file(module)
+      end
     end)
 
     # reload consolidated protocols (they may not show up in :code.modified_modules)
@@ -595,11 +685,12 @@ defmodule FlyDeploy.ReloadScript do
             |> Path.basename(".beam")
             |> String.to_atom()
 
-          # purge and reload the consolidated protocol
+          # purge and reload the consolidated protocol using load_binary for embedded mode
           Logger.info("[#{inspect(__MODULE__)}] Reloading consolidated protocol: #{module_name}")
 
           :code.purge(module_name)
-          :code.load_file(module_name)
+          beam_binary = File.read!(beam_path)
+          :code.load_binary(module_name, String.to_charlist(beam_path), beam_binary)
         end)
     end
   end

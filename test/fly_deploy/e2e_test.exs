@@ -128,11 +128,13 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("  Before hot upgrade - app.css content hash: #{v1_css_hash}")
     IO.puts("✓ Recorded v1 static asset hash\n")
 
-    # Step 3: Perform hot upgrade to v2
+    # Step 3: Perform hot upgrade to v2 (with new controller module)
     IO.puts("Step 3: Performing hot upgrade to v2...")
     update_health_controller_version("v2")
     update_counter_module("v2")
     update_static_assets("v2")
+    add_new_feature_controller()
+    update_router_with_new_feature()
     _hot_upgrade_output = deploy_hot()
     wait_for_deployment()
 
@@ -234,6 +236,19 @@ defmodule FlyDeploy.E2ETest do
 
     IO.puts("✓ VERIFIED: Static assets were updated (hash changed from v1 to v2)\n")
 
+    # Step 4d: Verify new module (controller added in v2) is accessible
+    IO.puts("Step 4d: Verifying new controller module is loaded and accessible...")
+    new_feature_response = get_new_feature(app_url)
+
+    assert new_feature_response["status"] == "ok",
+           "New feature endpoint should be accessible after hot upgrade"
+
+    assert new_feature_response["version"] == "v2",
+           "New feature should report v2"
+
+    IO.puts("  New feature response: #{inspect(new_feature_response)}")
+    IO.puts("✓ VERIFIED: New controller module loaded and accessible after hot upgrade\n")
+
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
     restart_all_machines()
@@ -274,6 +289,8 @@ defmodule FlyDeploy.E2ETest do
     update_health_controller_version("v3")
     update_counter_module("v3")
     update_static_assets("v3")
+    remove_new_feature_controller()
+    restore_router_without_new_feature()
     deploy_cold()
     wait_for_deployment()
     IO.puts("✓ Cold deployed v3\n")
@@ -719,5 +736,109 @@ defmodule FlyDeploy.E2ETest do
     json_line = output |> String.split("\n") |> Enum.find("", &String.starts_with?(&1, "{"))
     result = Jason.decode!(json_line)
     result["md5"]
+  end
+
+  # New module test helpers
+
+  defp add_new_feature_controller do
+    controller_path =
+      Path.join(@test_app_dir, "lib/test_app_web/controllers/new_feature_controller.ex")
+
+    content = """
+    defmodule TestAppWeb.NewFeatureController do
+      @moduledoc \"\"\"
+      A new controller added in v2 to test hot upgrade loading of new modules.
+      \"\"\"
+      use TestAppWeb, :controller
+
+      def show(conn, _params) do
+        json(conn, %{
+          status: "ok",
+          version: "v2",
+          message: "This controller was added in v2 via hot upgrade"
+        })
+      end
+    end
+    """
+
+    File.write!(controller_path, content)
+    IO.puts("  Added new feature controller (v2 only)")
+  end
+
+  defp update_router_with_new_feature do
+    router_path = Path.join(@test_app_dir, "lib/test_app_web/router.ex")
+
+    content = """
+    defmodule TestAppWeb.Router do
+      use TestAppWeb, :router
+      import Phoenix.LiveView.Router
+
+      pipeline :api do
+        plug :accepts, ["json"]
+      end
+
+      scope "/api", TestAppWeb do
+        pipe_through :api
+
+        get "/health", HealthController, :show
+        post "/counter/increment", CounterController, :increment
+        get "/new-feature", NewFeatureController, :show
+      end
+
+      scope "/", TestAppWeb do
+        pipe_through :api
+
+        live "/lv", TestLive, :show
+      end
+    end
+    """
+
+    File.write!(router_path, content)
+    IO.puts("  Updated router with new feature route")
+  end
+
+  defp remove_new_feature_controller do
+    controller_path =
+      Path.join(@test_app_dir, "lib/test_app_web/controllers/new_feature_controller.ex")
+
+    File.rm(controller_path)
+    IO.puts("  Removed new feature controller")
+  end
+
+  defp restore_router_without_new_feature do
+    router_path = Path.join(@test_app_dir, "lib/test_app_web/router.ex")
+
+    content = """
+    defmodule TestAppWeb.Router do
+      use TestAppWeb, :router
+      import Phoenix.LiveView.Router
+
+      pipeline :api do
+        plug :accepts, ["json"]
+      end
+
+      scope "/api", TestAppWeb do
+        pipe_through :api
+
+        get "/health", HealthController, :show
+        post "/counter/increment", CounterController, :increment
+      end
+
+      scope "/", TestAppWeb do
+        pipe_through :api
+
+        live "/lv", TestLive, :show
+      end
+    end
+    """
+
+    File.write!(router_path, content)
+    IO.puts("  Restored router without new feature route")
+  end
+
+  defp get_new_feature(app_url) do
+    url = "#{app_url}/api/new-feature"
+    response = Req.get!(url)
+    response.body
   end
 end
