@@ -184,9 +184,20 @@ defmodule Mix.Tasks.FlyDeploy.Status do
 
           IO.puts("  Applied: #{info.deployed_at}")
 
+          # Check if upgrade was actually applied to this machine (local marker exists and matches)
+          locally_applied = Map.get(info, :locally_applied, false)
+
           # Check if hot upgrade is stale by comparing machine's current image with S3 state's base image_ref
           # If they match, hot upgrade is still valid. If not, a new cold deploy happened.
           cond do
+            not locally_applied ->
+              IO.puts(
+                IO.ANSI.format([
+                  :red,
+                  "  Status: ✗ NOT APPLIED (upgrade failed on this machine)"
+                ])
+              )
+
             is_nil(info.base_image_ref) ->
               IO.puts(
                 IO.ANSI.format([

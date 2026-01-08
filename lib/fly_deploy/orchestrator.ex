@@ -2,6 +2,8 @@ defmodule FlyDeploy.Orchestrator do
   @moduledoc false
   # Builds tarballs, uploads to S3, triggers upgrades across all machines
 
+  require Logger
+
   def run(opts \\ []) do
     IO.puts(ansi([:cyan, :bright], "==> Orchestrator starting"))
 
@@ -40,8 +42,8 @@ defmodule FlyDeploy.Orchestrator do
     try do
       acquire_lock(app, image_ref, bucket)
 
-      # step 1: Build tarball
-      {tarball_path, tarball_info} = build_tarball(app)
+      # step 1: Build tarball (includes marker file with upgrade info)
+      {tarball_path, tarball_info} = build_tarball(app, image_ref, version)
 
       # step 2: Upload to Tigris
       url = upload_to_tigris(tarball_path, app, version, bucket)
@@ -255,11 +257,11 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
-  defp build_tarball(app) do
+  defp build_tarball(app, source_image_ref, version) do
     IO.puts(ansi([:yellow], "--> Creating tarball"))
 
-    version = Application.spec(app, :vsn) |> to_string()
-    tarball_path = Path.join(System.tmp_dir!(), "#{app}-#{version}.tar.gz")
+    app_version = Application.spec(app, :vsn) |> to_string()
+    tarball_path = Path.join(System.tmp_dir!(), "#{app}-#{app_version}.tar.gz")
 
     # find all beam files (both lib and consolidated protocols)
     beam_files = Path.wildcard("/app/lib/**/ebin/*.beam")
@@ -270,14 +272,31 @@ defmodule FlyDeploy.Orchestrator do
       Path.wildcard("/app/lib/#{app}-*/priv/static/**/*")
       |> Enum.filter(&File.regular?/1)
 
+    # create marker file with upgrade info - this proves the upgrade was applied
+    marker_path = Path.join(System.tmp_dir!(), "fly_deploy_marker.json")
+
+    marker_content =
+      Jason.encode!(%{
+        source_image_ref: source_image_ref,
+        version: version,
+        app_version: app_version,
+        created_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      })
+
+    File.write!(marker_path, marker_content)
+
     all_files = beam_files ++ consolidated_files ++ static_files
 
-    # create tar
+    # create tar with all files plus the marker
     files_to_tar =
       Enum.map(all_files, fn path ->
         rel_path = Path.relative_to(path, "/app")
         {String.to_charlist(rel_path), String.to_charlist(path)}
       end)
+
+    # add marker file at a known location inside the tarball
+    marker_entry = {~c"fly_deploy_marker.json", String.to_charlist(marker_path)}
+    files_to_tar = [marker_entry | files_to_tar]
 
     :ok = :erl_tar.create(String.to_charlist(tarball_path), files_to_tar, [:compressed])
 
@@ -473,6 +492,17 @@ defmodule FlyDeploy.Orchestrator do
   end
 
   defp reload_machine(machine_id, region, tarball_url, app, suspend_timeout) do
+    reload_machine_with_retries(
+      machine_id,
+      region,
+      tarball_url,
+      app,
+      suspend_timeout,
+      _retries = 3
+    )
+  end
+
+  defp reload_machine_with_retries(machine_id, region, tarball_url, app, suspend_timeout, retries) do
     app_name = System.fetch_env!("FLY_APP_NAME")
     api_token = System.fetch_env!("FLY_API_TOKEN")
 
@@ -500,26 +530,60 @@ defmodule FlyDeploy.Orchestrator do
 
     case result do
       {:ok, response} when response.status == 200 ->
-        parse_machine_result(machine_id, region, response.body)
+        parsed = parse_machine_result(machine_id, region, response.body)
+
+        # Retry if the upgrade itself failed (not just the HTTP request)
+        if parsed.success do
+          parsed
+        else
+          maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, parsed)
+        end
 
       {:ok, response} ->
         body_info = format_response_body(response.body)
 
-        %{
+        error_result = %{
           machine_id: machine_id,
           region: region,
           success: false,
           error: "HTTP #{response.status}: #{body_info}"
         }
 
+        maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, error_result)
+
       {:error, reason} ->
-        %{
+        error_result = %{
           machine_id: machine_id,
           region: region,
           success: false,
           error: "Request failed: #{inspect(reason)}"
         }
+
+        maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, error_result)
     end
+  end
+
+  defp maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, error_result)
+       when retries > 0 do
+    Logger.warning(
+      "[#{inspect(__MODULE__)}] Machine #{machine_id} failed, retrying (#{retries} left): #{error_result.error}"
+    )
+
+    # Wait before retry with exponential backoff
+    Process.sleep(1000 * (4 - retries))
+
+    reload_machine_with_retries(
+      machine_id,
+      region,
+      tarball_url,
+      app,
+      suspend_timeout,
+      retries - 1
+    )
+  end
+
+  defp maybe_retry(_machine_id, _region, _tarball_url, _app, _suspend_timeout, 0, error_result) do
+    error_result
   end
 
   defp format_response_body(body) when is_map(body) do

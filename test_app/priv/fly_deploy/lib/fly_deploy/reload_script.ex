@@ -81,6 +81,15 @@ defmodule FlyDeploy.ReloadScript do
     File.mkdir_p!(upgrade_dir)
     :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
+    # Copy marker file to /app to prove upgrade was applied on this machine
+    marker_src = Path.join(upgrade_dir, "fly_deploy_marker.json")
+    marker_dest = "/app/fly_deploy_marker.json"
+
+    if File.exists?(marker_src) do
+      File.cp!(marker_src, marker_dest)
+      Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
+    end
+
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
     IO.puts("Copying beam files to currently loaded paths...")
@@ -271,6 +280,15 @@ defmodule FlyDeploy.ReloadScript do
     IO.puts("Extracting...")
     File.mkdir_p!(upgrade_dir)
     :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
+
+    # Copy marker file to /app to prove upgrade was applied on this machine
+    marker_src = Path.join(upgrade_dir, "fly_deploy_marker.json")
+    marker_dest = "/app/fly_deploy_marker.json"
+
+    if File.exists?(marker_src) do
+      File.cp!(marker_src, marker_dest)
+      Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
+    end
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies

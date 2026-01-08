@@ -319,6 +319,9 @@ defmodule FlyDeploy do
   def get_current_hot_upgrade_info(app) do
     my_image_ref = System.get_env("FLY_IMAGE_REF")
 
+    # Read local marker file - this proves the upgrade was actually applied to THIS machine
+    local_marker = read_local_marker()
+
     case fetch_current_state(app) do
       {:ok, current} ->
         # Get the image_ref from S3 state (the base image for this deployment generation)
@@ -328,27 +331,51 @@ defmodule FlyDeploy do
           nil ->
             %{
               hot_upgrade_applied: false,
+              locally_applied: local_marker != nil,
               current_image_ref: my_image_ref || "unknown",
               base_image_ref: base_image_ref
             }
 
           upgrade ->
+            # Check if local marker matches S3 - confirms upgrade was actually applied here
+            locally_applied =
+              local_marker != nil &&
+                local_marker["source_image_ref"] == upgrade["source_image_ref"]
+
             %{
               hot_upgrade_applied: true,
+              locally_applied: locally_applied,
               version: upgrade["version"],
               source_image_ref: upgrade["source_image_ref"],
               deployed_at: upgrade["deployed_at"],
               current_image_ref: my_image_ref || "unknown",
-              base_image_ref: base_image_ref
+              base_image_ref: base_image_ref,
+              local_marker: local_marker
             }
         end
 
       {:error, _reason} ->
         %{
           hot_upgrade_applied: false,
+          locally_applied: local_marker != nil,
           current_image_ref: my_image_ref || "unknown",
           base_image_ref: nil
         }
+    end
+  end
+
+  defp read_local_marker do
+    marker_path = "/app/fly_deploy_marker.json"
+
+    case File.read(marker_path) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, marker} -> marker
+          {:error, _} -> nil
+        end
+
+      {:error, _} ->
+        nil
     end
   end
 

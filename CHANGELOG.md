@@ -1,3 +1,8 @@
+## 0.1.16 (2026-01-08)
+- Add retry handling for failed machine upgrades (3 retries with exponential backoff)
+- Add local marker file to accurately detect per-machine upgrade status
+- fix `fly_deploy.status` claiming successful upgrade for partially failed machine upgrades
+
 ## 0.1.15 (2025-12-19)
 - Fix new module code not being loaded on upgrades
 
