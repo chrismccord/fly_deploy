@@ -52,14 +52,15 @@ defmodule TestApp.Counter do
 
   @impl true
   def handle_call(:get_info, _from, state) do
-    {:reply, %{
-      count: state.count,
-      version: state.version,
-      pid: self(),
-      protocol_version: state.protocol_version,
-      string_representation: to_string(state),
-      protocol_consolidated: Protocol.consolidated?(String.Chars)
-    }, state}
+    {:reply,
+     %{
+       count: state.count,
+       version: state.version,
+       pid: self(),
+       protocol_version: state.protocol_version,
+       string_representation: to_string(state),
+       protocol_consolidated: Protocol.consolidated?(String.Chars)
+     }, state}
   end
 
   @impl true
@@ -76,4 +77,3 @@ defimpl String.Chars, for: TestApp.Counter.State do
     "Counter[count=#{state.count}, version=#{state.version}, protocol_v=#{state.protocol_version}]"
   end
 end
-

@@ -301,6 +301,7 @@ defmodule Mix.Tasks.FlyDeploy.Status do
             {:ok,
              %{
                hot_upgrade_applied: data["hot_upgrade_applied"] || false,
+               locally_applied: data["locally_applied"] || false,
                version: data["version"],
                source_deployment_id: source_deployment_id,
                source_image_ref: data["source_image_ref"],

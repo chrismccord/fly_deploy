@@ -1,3 +1,6 @@
+## 0.1.17 (2026-01-09)
+- Fix `fly_deploy.status` not parsing `locally_applied` field from RPC response
+
 ## 0.1.16 (2026-01-08)
 - Add retry handling for failed machine upgrades (3 retries with exponential backoff)
 - Add local marker file to accurately detect per-machine upgrade status
