@@ -1,3 +1,20 @@
+## 0.2.0 (2026-01-13)
+
+### Breaking Changes
+- **New supervision tree integration**: Replace `FlyDeploy.startup_reapply_current(:my_app)` with `{FlyDeploy, otp_app: :my_app}` in your supervision tree. Must be placed at the TOP of children list.
+- `startup_reapply_current/1` is deprecated
+
+### New Features
+- **S3 polling architecture**: Machines now poll S3 for upgrades for more robust hot upgrade signaling
+- **`FlyDeploy.current_vsn/0`**: Query the current code version fingerprint at runtime. Returns base image ref, hot upgrade ref, version, and a 12-char fingerprint hash.
+- **Continuous polling**: After initial startup, machines continue polling S3 (default: every 1 second) for new upgrades. Configurable via `:poll_interval` option.
+- **Machine-written results**: Each machine writes its upgrade result to S3, allowing the orchestrator to track progress without RPC.
+
+### Improvements
+- Renamed internal `ReloadScript` module to `Upgrader` for clarity
+- Orchestrator now polls S3 for results instead of using `fly machines exec`
+- Better timeout handling with explicit timeout errors in orchestrator output
+
 ## 0.1.17 (2026-01-09)
 - Fix `fly_deploy.status` not parsing `locally_applied` field from RPC response
 

@@ -337,6 +337,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         env_flags ++
         config_env_flags ++
         [
+          "--rm",
           "--shell",
           "--command",
           eval_command

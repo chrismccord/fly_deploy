@@ -166,56 +166,93 @@ defmodule FlyDeploy do
   require Logger
 
   @doc """
-  Reapplies the current hot upgrade on application startup.
+  Returns a child specification for the FlyDeploy poller.
 
-  Detects new cold deploys and resets state automatically.
-  This should be called early in `Application.start/2`, after HTTP clients
-  are available but before starting the main supervision tree. It checks S3
-  for pending hot upgrades matching the current Docker image and reapplies
-  them if found.
+  Add this to your supervision tree to enable automatic hot upgrade polling:
 
-  Returns:
-  - `:ok` - Successfully applied hot upgrade, or no upgrade needed (ie new cold deploy)
-  - `{:error, reason}` - Check failed, app continues with current code
+      def start(_type, _args) do
+        children = [
+          {FlyDeploy, otp_app: :my_app},
+          # ... rest of your children
+        ]
+
+        Supervisor.start_link(children, strategy: :one_for_one)
+      end
+
+  ## Options
+
+  - `:otp_app` - The OTP application name (required)
+  - `:poll_interval` - How often to poll S3 in ms (default: 1000)
+  - `:suspend_timeout` - Timeout for suspending processes during upgrade in ms (default: 10_000)
+
+  ## Important
+
+  Place `{FlyDeploy, otp_app: :my_app}` at the **TOP** of your children list.
+  The poller blocks during `init/1` to apply any pending hot upgrades before
+  the rest of the supervision tree starts. This ensures new code is loaded
+  before other processes start.
+  """
+  defdelegate child_spec(opts), to: FlyDeploy.Poller
+
+  @doc """
+  Returns the current code version fingerprint.
+
+  The fingerprint is a map containing:
+  - `:base_image_ref` - The base Docker image (FLY_IMAGE_REF)
+  - `:hot_ref` - The hot upgrade source image ref (nil if no hot upgrade applied)
+  - `:version` - The hot upgrade version (nil if no hot upgrade applied)
+  - `:fingerprint` - A short 12-character hash combining base + hot refs
+
+  Returns `nil` if poller hasn't been started or version not yet initialized.
 
   ## Example
 
+      FlyDeploy.current_vsn()
+      #=> %{
+      #     base_image_ref: "registry.fly.io/my-app:deployment-01K93Q...",
+      #     hot_ref: "registry.fly.io/my-app:deployment-01K94R...",
+      #     version: "0.1.5",
+      #     fingerprint: "a1b2c3d4e5f6"
+      #   }
+
+  """
+  defdelegate current_vsn(), to: FlyDeploy.Poller
+
+  @doc """
+  Deprecated: Use `{FlyDeploy, otp_app: :my_app}` in your supervision tree instead.
+
+  This function is kept for backwards compatibility but simply starts the poller.
+
+  ## Migration
+
+  Replace:
+
       def start(_type, _args) do
         :ok = FlyDeploy.startup_reapply_current(:my_app)
-        # ... start supervision tree
+        children = [...]
+        Supervisor.start_link(children, strategy: :one_for_one)
+      end
+
+  With:
+
+      def start(_type, _args) do
+        children = [
+          {FlyDeploy, otp_app: :my_app},
+          # ... rest of your children
+        ]
+        Supervisor.start_link(children, strategy: :one_for_one)
       end
 
   """
-  def startup_reapply_current(app) do
-    my_image_ref = System.get_env("FLY_IMAGE_REF")
+  @deprecated "Use {FlyDeploy, otp_app: :my_app} in your supervision tree instead"
+  def startup_reapply_current(app, opts \\ []) do
+    poller_opts = Keyword.merge(opts, otp_app: app)
 
-    if is_nil(my_image_ref) do
-      Logger.info("[FlyDeploy] No FLY_IMAGE_REF found (dev environment?), skipping")
-      :ok
-    else
-      Logger.info("[FlyDeploy] Machine starting with image: #{my_image_ref}")
-
-      case fetch_current_state(app) do
-        {:ok, current} ->
-          handle_current_state(app, my_image_ref, current)
-
-        {:error, :not_found} ->
-          Logger.info("[FlyDeploy] First boot, initializing current state")
-          initialize_current_state(app, my_image_ref)
-          :noop
-
-        {:error, reason} ->
-          Logger.warning("[FlyDeploy] Failed to fetch current state: #{inspect(reason)}")
-          {:error, reason}
-      end
+    case FlyDeploy.Poller.start_link(poller_opts) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, reason} -> {:error, reason}
     end
-  rescue
-    e ->
-      Logger.error(
-        "[FlyDeploy] Unexpected error during startup check: #{Exception.format(:error, e, __STACKTRACE__)}"
-      )
-
-      {:error, e}
   end
 
   @doc """
@@ -251,6 +288,7 @@ defmodule FlyDeploy do
   """
   def orchestrate(opts) do
     FlyDeploy.Orchestrator.run(opts)
+    System.halt()
   end
 
   @doc """
@@ -284,7 +322,7 @@ defmodule FlyDeploy do
   - Errors are caught and logged without crashing
   """
   def hot_upgrade(tarball_url, app, opts \\ []) do
-    FlyDeploy.ReloadScript.hot_upgrade(tarball_url, app, opts)
+    FlyDeploy.Upgrader.hot_upgrade(tarball_url, app, opts)
   end
 
   @doc """
@@ -399,29 +437,6 @@ defmodule FlyDeploy do
       System.get_env("AWS_REGION", "auto")
   end
 
-  defp handle_current_state(app, my_image_ref, current) do
-    current_image_ref = Map.get(current, "image_ref")
-
-    if current_image_ref == my_image_ref do
-      case Map.get(current, "hot_upgrade") do
-        nil ->
-          Logger.info("[FlyDeploy] No hot upgrade available for this generation")
-          :ok
-
-        upgrade ->
-          Logger.info("[FlyDeploy] Applying hot upgrade v#{upgrade["version"]}")
-          apply_hot_upgrade(upgrade["tarball_url"], app)
-      end
-    else
-      Logger.info(
-        "[FlyDeploy] New cold deploy detected (was: #{current_image_ref}, now: #{my_image_ref}), resetting state"
-      )
-
-      initialize_current_state(app, my_image_ref)
-      :ok
-    end
-  end
-
   defp fetch_current_state(app) do
     # Look up bucket from Application env (set via Mix config) or BUCKET_NAME env var
     bucket = Application.get_env(:fly_deploy, :bucket) || System.get_env("BUCKET_NAME")
@@ -454,67 +469,5 @@ defmodule FlyDeploy do
           {:error, reason}
       end
     end
-  end
-
-  defp initialize_current_state(app, image_ref) do
-    state = %{
-      "image_ref" => image_ref,
-      "set_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "hot_upgrade" => nil
-    }
-
-    write_current_state(app, state)
-  end
-
-  defp write_current_state(app, state) do
-    # Look up bucket from Application env (set via Mix config) or BUCKET_NAME env var
-    bucket = Application.get_env(:fly_deploy, :bucket) || System.get_env("BUCKET_NAME")
-
-    if is_nil(bucket) do
-      raise "No bucket configured. Set bucket in Mix config or ensure BUCKET_NAME env var is set via `fly storage create`"
-    end
-
-    url = "#{s3_endpoint()}/#{bucket}/releases/#{app}-current.json"
-
-    case Req.put(url,
-           receive_timeout: 10_000,
-           connect_options: [timeout: 10_000],
-           json: state,
-           headers: [{"content-type", "application/json"}],
-           aws_sigv4: [
-             access_key_id: aws_access_key_id(),
-             secret_access_key: aws_secret_access_key(),
-             service: "s3",
-             region: aws_region()
-           ]
-         ) do
-      {:ok, %{status: status}} when status in 200..299 ->
-        Logger.debug("[FlyDeploy] Current state written successfully")
-        :ok
-
-      {:ok, %{status: status}} ->
-        Logger.warning("[FlyDeploy] Failed to write state (status #{status})")
-        {:error, {:write_failed, status}}
-
-      {:error, reason} ->
-        Logger.warning("[FlyDeploy] Failed to write state: #{inspect(reason)}")
-        {:error, reason}
-    end
-  end
-
-  defp apply_hot_upgrade(tarball_url, app) do
-    Logger.info("[FlyDeploy] Downloading and applying #{tarball_url}...")
-
-    # Use the startup-specific replay function which uses :c.lm()
-    FlyDeploy.ReloadScript.replay_upgrade_startup(tarball_url, app)
-    Logger.info("[FlyDeploy] ✅ Hot upgrade applied successfully")
-    :ok
-  rescue
-    e ->
-      Logger.error(
-        "[FlyDeploy] Failed to apply startup hot upgrade: #{Exception.format(:error, e, __STACKTRACE__)}"
-      )
-
-      {:error, e}
   end
 end

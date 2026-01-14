@@ -7,10 +7,9 @@ defmodule TestApp.Application do
 
   @impl true
   def start(_type, _args) do
-    # Check for and reapply hot upgrades on startup
-    FlyDeploy.startup_reapply_current(:test_app)
-
     children = [
+      # FlyDeploy MUST be first - it blocks to apply hot upgrades before other processes start
+      {FlyDeploy, otp_app: :test_app},
       {DNSCluster, query: Application.get_env(:test_app, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: TestApp.PubSub},
       # Start the counter GenServer for hot upgrade testing

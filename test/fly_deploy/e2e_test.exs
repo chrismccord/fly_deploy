@@ -42,6 +42,10 @@ defmodule FlyDeploy.E2ETest do
     File.cp!(Path.join(src_dir, "mix.exs"), Path.join(priv_fly_deploy_dir, "mix.exs"))
     File.cp_r!(Path.join(src_dir, "lib"), Path.join(priv_fly_deploy_dir, "lib"))
 
+    # Write a cache buster file to ensure Docker always rebuilds priv layer
+    cache_buster = Path.join(priv_fly_deploy_dir, ".cache_buster")
+    File.write!(cache_buster, "#{System.system_time(:nanosecond)}")
+
     IO.puts("  ✓ Source files copied to priv/fly_deploy")
 
     # Install dependencies in test_app
@@ -249,6 +253,22 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("  New feature response: #{inspect(new_feature_response)}")
     IO.puts("✓ VERIFIED: New controller module loaded and accessible after hot upgrade\n")
 
+    # Step 4e: Verify FlyDeploy.current_vsn() is tracking the hot upgrade
+    IO.puts("Step 4e: Verifying FlyDeploy.current_vsn() tracks the hot upgrade...")
+    fly_deploy_vsn = after_upgrade["fly_deploy_vsn"]
+
+    assert fly_deploy_vsn != nil, "fly_deploy_vsn should not be nil after hot upgrade"
+    assert fly_deploy_vsn["fingerprint"] != nil, "fingerprint should not be nil"
+    assert String.length(fly_deploy_vsn["fingerprint"]) == 12, "fingerprint should be 12 chars"
+    assert fly_deploy_vsn["hot_ref"] != nil, "hot_ref should not be nil after hot upgrade"
+    assert fly_deploy_vsn["version"] == "0.1.0", "version should match deployed version"
+
+    IO.puts("  fingerprint: #{fly_deploy_vsn["fingerprint"]}")
+    IO.puts("  hot_ref: #{fly_deploy_vsn["hot_ref"]}")
+    IO.puts("  version: #{fly_deploy_vsn["version"]}")
+    IO.puts("  base_image_ref: #{fly_deploy_vsn["base_image_ref"]}")
+    IO.puts("✓ VERIFIED: FlyDeploy.current_vsn() correctly tracks hot upgrade\n")
+
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
     restart_all_machines()
@@ -280,6 +300,16 @@ defmodule FlyDeploy.E2ETest do
 
     IO.puts("  Protocol consolidated: #{after_restart["counter"]["protocol_consolidated"]}")
 
+    # Verify current_vsn persists after restart
+    restart_vsn = after_restart["fly_deploy_vsn"]
+    assert restart_vsn != nil, "fly_deploy_vsn should persist after restart"
+    assert restart_vsn["hot_ref"] != nil, "hot_ref should persist after restart"
+
+    assert restart_vsn["fingerprint"] == fly_deploy_vsn["fingerprint"],
+           "fingerprint should be same after restart"
+
+    IO.puts("  fly_deploy_vsn fingerprint: #{restart_vsn["fingerprint"]} (persisted)")
+
     IO.puts(
       "✓ Startup reapply successful - still running v2 with fresh state and consolidated protocols\n"
     )
@@ -308,6 +338,17 @@ defmodule FlyDeploy.E2ETest do
       "  Counter after cold deploy: count=#{after_cold["counter"]["count"]}, version=#{after_cold["counter"]["version"]}"
     )
 
+    # Verify current_vsn is reset after cold deploy (no hot upgrade applied)
+    cold_vsn = after_cold["fly_deploy_vsn"]
+    assert cold_vsn != nil, "fly_deploy_vsn should exist after cold deploy"
+    assert cold_vsn["hot_ref"] == nil, "hot_ref should be nil after cold deploy (no hot upgrade)"
+    assert cold_vsn["version"] == nil, "version should be nil after cold deploy"
+
+    assert cold_vsn["fingerprint"] != fly_deploy_vsn["fingerprint"],
+           "fingerprint should change after cold deploy"
+
+    IO.puts("  fly_deploy_vsn fingerprint: #{cold_vsn["fingerprint"]} (reset, hot_ref=nil)")
+
     IO.puts("✓ Cold deploy successful - v3 running, stale hot upgrade was NOT reapplied\n")
 
     IO.puts("=== E2E Hot Upgrade Test Complete ===\n")
@@ -325,10 +366,12 @@ defmodule FlyDeploy.E2ETest do
 
       def show(conn, _params) do
         counter_info = TestApp.Counter.get_info()
+        fly_deploy_vsn = FlyDeploy.current_vsn()
 
         json(conn, %{
           status: "ok-#{version}",
           components_defined: Code.ensure_loaded?(FlyDeploy.Components),
+          fly_deploy_vsn: fly_deploy_vsn,
           counter: %{
             count: counter_info.count,
             version: counter_info.version,
@@ -433,7 +476,11 @@ defmodule FlyDeploy.E2ETest do
         ""
       end
 
+    # Add cache buster to ensure Docker rebuilds lib layer
+    cache_buster = System.system_time(:nanosecond)
+
     content = """
+    # Cache buster: #{cache_buster}
     defmodule TestApp.Counter do
       @moduledoc \"\"\"
       A simple GenServer counter for testing hot code upgrades.
@@ -521,13 +568,13 @@ defmodule FlyDeploy.E2ETest do
 
   defp deploy_cold do
     IO.puts(
-      "  Running: fly deploy --remote-only --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
+      "  Running: fly deploy --remote-only --no-cache --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
     )
 
     {output, exit_code} =
       System.cmd(
         "fly",
-        ["deploy", "--remote-only", "--smoke-checks=false", "-a", @app_name],
+        ["deploy", "--remote-only", "--no-cache", "--smoke-checks=false", "-a", @app_name],
         cd: @test_app_dir,
         into: IO.stream()
       )

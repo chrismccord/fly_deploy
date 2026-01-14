@@ -1,6 +1,12 @@
-defmodule FlyDeploy.ReloadScript do
-  @moduledoc false
-  # Downloads and applies upgrades on individual machines
+defmodule FlyDeploy.Upgrader do
+  @moduledoc """
+  Downloads and applies hot code upgrades on individual machines.
+
+  This module handles the actual upgrade process:
+  1. Download tarball from S3
+  2. Extract and copy .beam files
+  3. Suspend processes, load new code, upgrade processes, resume
+  """
 
   require Logger
 
@@ -29,23 +35,10 @@ defmodule FlyDeploy.ReloadScript do
     * `:suspend_timeout` - Timeout in ms for suspending each process (default: 10_000)
   """
   def hot_upgrade(tarball_url, app, opts \\ []) do
-    try do
-      do_hot_upgrade(tarball_url, app, opts)
-    rescue
-      e ->
-        # report error back via JSON for debugging
-        error_result = %{
-          success: false,
-          error: %{
-            type: inspect(e.__struct__),
-            message: Exception.message(e),
-            stacktrace: Exception.format_stacktrace(__STACKTRACE__)
-          }
-        }
-
-        print_json(error_result)
-        reraise e, __STACKTRACE__
-    end
+    do_hot_upgrade(tarball_url, app, opts)
+  rescue
+    e ->
+      {:error, Exception.message(e)}
   end
 
   defp do_hot_upgrade(tarball_url, app, opts) do
@@ -216,16 +209,15 @@ defmodule FlyDeploy.ReloadScript do
 
     IO.puts("✅ Hot reload complete!")
 
-    # output JSON result for parsing by orchestrator
-    print_json(%{
-      success: result.processes_failed == 0,
-      modules_reloaded: result.modules_reloaded,
-      module_names: result.module_names,
-      processes_succeeded: result.processes_succeeded,
-      process_names: result.process_names,
-      processes_failed: result.processes_failed,
-      suspend_duration_ms: result.suspend_duration_ms
-    })
+    {:ok,
+     %{
+       modules_reloaded: result.modules_reloaded,
+       module_names: result.module_names,
+       processes_succeeded: result.processes_succeeded,
+       process_names: result.process_names,
+       processes_failed: result.processes_failed,
+       suspend_duration_ms: result.suspend_duration_ms
+     }}
   end
 
   @doc """
@@ -755,9 +747,5 @@ defmodule FlyDeploy.ReloadScript do
       nil ->
         Logger.info("[#{inspect(__MODULE__)}] No application module found for #{app}")
     end
-  end
-
-  defp print_json(%{} = map) do
-    IO.puts("__FLY_DEPLOY_RESULT__#{Jason.encode!(map)}__FLY_DEPLOY_RESULT__")
   end
 end

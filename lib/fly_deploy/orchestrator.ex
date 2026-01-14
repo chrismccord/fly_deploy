@@ -31,9 +31,7 @@ defmodule FlyDeploy.Orchestrator do
 
     # get config values from environment variables (passed from Mix task)
     version = System.get_env("DEPLOY_VERSION")
-    max_concurrency = String.to_integer(System.get_env("DEPLOY_MAX_CONCURRENCY", "20"))
-    timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", "60000"))
-    suspend_timeout = String.to_integer(System.get_env("DEPLOY_SUSPEND_TIMEOUT", "10000"))
+    timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", "120000"))
 
     # track start time
     start_time = System.monotonic_time(:millisecond)
@@ -51,12 +49,16 @@ defmodule FlyDeploy.Orchestrator do
       # step 3: Update current state with hot upgrade info
       update_current_state_with_hot_upgrade(url, app, image_ref, version, bucket)
 
-      # step 4: Trigger reload on all machines
-      results = trigger_machine_reloads(url, app, max_concurrency, timeout, suspend_timeout)
+      # step 4: Wait for machines to pick up and apply the upgrade (via polling)
+      upgrade_id = upgrade_id_from_ref(image_ref)
+      results = wait_for_machine_upgrades(app, upgrade_id, bucket, timeout)
 
       duration = System.monotonic_time(:millisecond) - start_time
 
       print_summary(results, tarball_info, duration)
+
+      # step 5: Clean up old results (keep last 5)
+      cleanup_old_results(app, bucket, 5)
     after
       # always release the lock, even if deployment fails
       release_lock(app, bucket)
@@ -85,6 +87,14 @@ defmodule FlyDeploy.Orchestrator do
   defp aws_region do
     Application.get_env(:fly_deploy, :aws_region) ||
       System.get_env("AWS_REGION", "auto")
+  end
+
+  defp upgrade_id_from_ref(image_ref) do
+    # Extract deployment ID from image ref like "registry.fly.io/app:deployment-01KEW7VFV2K1D4NA9GKZYMFW3R"
+    case Regex.run(~r/deployment-([A-Z0-9]+)/, image_ref) do
+      [_, id] -> id
+      _ -> :crypto.hash(:sha256, image_ref) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+    end
   end
 
   defp acquire_lock(app, deployment_id, bucket) do
@@ -420,8 +430,8 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
-  defp trigger_machine_reloads(tarball_url, app, max_concurrency, timeout, suspend_timeout) do
-    IO.puts(ansi([:yellow], "--> Upgrading machines"))
+  defp wait_for_machine_upgrades(app, upgrade_id, bucket, timeout) do
+    IO.puts(ansi([:yellow], "--> Waiting for machines to upgrade"))
 
     # get machines from Fly API
     api_token = System.fetch_env!("FLY_API_TOKEN")
@@ -441,7 +451,7 @@ defmodule FlyDeploy.Orchestrator do
       machines_response.body
       |> Enum.filter(&(&1["state"] == "started" && !(&1["config"]["services"] in [nil, []])))
 
-    # Show which machines we're upgrading
+    # Show which machines we're waiting for
     IO.puts("    Found #{length(machines)} machines:")
 
     Enum.each(machines, fn machine ->
@@ -452,253 +462,227 @@ defmodule FlyDeploy.Orchestrator do
 
     IO.puts("")
 
-    # reload each machine
-    results =
-      Task.async_stream(
-        machines,
-        fn machine ->
-          reload_machine(machine["id"], machine["region"], tarball_url, app, suspend_timeout)
-        end,
-        timeout: timeout,
-        max_concurrency: max_concurrency
-      )
-      |> Enum.map(fn {:ok, result} -> result end)
+    # Build a map of machine_id -> region for display
+    machine_regions =
+      machines
+      |> Enum.map(fn m -> {m["id"], m["region"]} end)
+      |> Map.new()
 
-    # filter to only app modules for successful results
-    Enum.map(results, fn result ->
-      if result.success do
-        Map.update!(result, :module_names, fn modules -> filter_app_modules(modules, app) end)
+    expected_machine_ids = Map.keys(machine_regions)
+
+    # Poll S3 for results until all machines report or timeout
+    poll_for_results(app, upgrade_id, bucket, expected_machine_ids, machine_regions, timeout)
+  end
+
+  defp poll_for_results(app, upgrade_id, bucket, expected_ids, machine_regions, timeout) do
+    start_time = System.monotonic_time(:millisecond)
+    poll_interval = 500
+    collected_results = %{}
+
+    do_poll(
+      app,
+      upgrade_id,
+      bucket,
+      expected_ids,
+      machine_regions,
+      timeout,
+      start_time,
+      poll_interval,
+      collected_results
+    )
+  end
+
+  defp do_poll(
+         app,
+         upgrade_id,
+         bucket,
+         expected_ids,
+         machine_regions,
+         timeout,
+         start_time,
+         poll_interval,
+         collected_results
+       ) do
+    elapsed = System.monotonic_time(:millisecond) - start_time
+
+    if elapsed > timeout do
+      # Timeout - return what we have, mark missing as failed
+      finalize_results(expected_ids, machine_regions, collected_results)
+    else
+      # Fetch any new results from S3
+      {new_results, collected_results} =
+        fetch_new_results(app, upgrade_id, bucket, expected_ids, collected_results)
+
+      # Print any new results as they come in
+      Enum.each(new_results, fn {machine_id, result} ->
+        print_machine_result(machine_id, machine_regions, result)
+      end)
+
+      # Check if we have final results (completed or failed) for all machines
+      all_final =
+        Enum.all?(expected_ids, fn id ->
+          case Map.get(collected_results, id) do
+            %{"status" => status} when status in ["completed", "failed"] -> true
+            _ -> false
+          end
+        end)
+
+      if all_final do
+        finalize_results(expected_ids, machine_regions, collected_results)
       else
-        result
+        Process.sleep(poll_interval)
+
+        do_poll(
+          app,
+          upgrade_id,
+          bucket,
+          expected_ids,
+          machine_regions,
+          timeout,
+          start_time,
+          poll_interval,
+          collected_results
+        )
       end
-    end)
+    end
   end
 
-  defp filter_app_modules(modules, app) do
-    # get the app directory (e.g., /app/lib/test_app-0.1.0)
-    app_dir = to_string(Application.app_dir(app))
-
-    Enum.filter(modules, fn module_name ->
-      # convert module name string back to atom to check code path
-      module = String.to_existing_atom("Elixir.#{module_name}")
-
-      case :code.which(module) do
-        # module is loaded, check if it's in the app directory
-        path when is_list(path) -> String.starts_with?(to_string(path), app_dir)
-        # module not loaded or preloaded
-        _ -> false
-      end
-    end)
-  end
-
-  defp reload_machine(machine_id, region, tarball_url, app, suspend_timeout) do
-    reload_machine_with_retries(
-      machine_id,
-      region,
-      tarball_url,
-      app,
-      suspend_timeout,
-      _retries = 3
-    )
-  end
-
-  defp reload_machine_with_retries(machine_id, region, tarball_url, app, suspend_timeout, retries) do
-    app_name = System.fetch_env!("FLY_APP_NAME")
-    api_token = System.fetch_env!("FLY_API_TOKEN")
-
-    # use Fly Machines API to execute the reload script
-    url = "https://api.machines.dev/v1/apps/#{app_name}/machines/#{machine_id}/exec"
-    binary_name = Atom.to_string(app)
-
-    # call the FlyDeploy.hot_upgrade function directly via RPC
-    command =
-      "/app/bin/#{binary_name} rpc \"FlyDeploy.hot_upgrade(\\\"#{tarball_url}\\\", :#{app}, suspend_timeout: #{suspend_timeout})\""
-
-    result =
-      Req.post(url,
-        receive_timeout: :timer.seconds(60),
-        connect_options: [timeout: :timer.seconds(60)],
-        headers: [
-          {"authorization", "Bearer #{api_token}"},
-          {"content-type", "application/json"}
-        ],
-        json: %{
-          cmd: command,
-          timeout: 30
-        }
-      )
-
-    case result do
-      {:ok, response} when response.status == 200 ->
-        parsed = parse_machine_result(machine_id, region, response.body)
-
-        # Retry if the upgrade itself failed (not just the HTTP request)
-        if parsed.success do
-          parsed
-        else
-          maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, parsed)
+  defp fetch_new_results(app, upgrade_id, bucket, expected_ids, collected_results) do
+    # Check each expected machine that we don't have a final result for yet
+    # (pending doesn't count as final)
+    incomplete_ids =
+      Enum.filter(expected_ids, fn id ->
+        case Map.get(collected_results, id) do
+          nil -> true
+          %{"status" => "pending"} -> true
+          _ -> false
         end
+      end)
 
-      {:ok, response} ->
-        body_info = format_response_body(response.body)
+    Enum.reduce(incomplete_ids, {%{}, collected_results}, fn machine_id,
+                                                             {new_acc, collected_acc} ->
+      case fetch_machine_result(app, upgrade_id, bucket, machine_id) do
+        {:ok, result} ->
+          prev = Map.get(collected_acc, machine_id)
+          # Only count as "new" if status changed (or didn't exist before)
+          is_new = is_nil(prev) || prev["status"] != result["status"]
 
-        error_result = %{
-          machine_id: machine_id,
-          region: region,
-          success: false,
-          error: "HTTP #{response.status}: #{body_info}"
-        }
-
-        maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, error_result)
-
-      {:error, reason} ->
-        error_result = %{
-          machine_id: machine_id,
-          region: region,
-          success: false,
-          error: "Request failed: #{inspect(reason)}"
-        }
-
-        maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, error_result)
-    end
-  end
-
-  defp maybe_retry(machine_id, region, tarball_url, app, suspend_timeout, retries, error_result)
-       when retries > 0 do
-    Logger.warning(
-      "[#{inspect(__MODULE__)}] Machine #{machine_id} failed, retrying (#{retries} left): #{error_result.error}"
-    )
-
-    # Wait before retry with exponential backoff
-    Process.sleep(1000 * (4 - retries))
-
-    reload_machine_with_retries(
-      machine_id,
-      region,
-      tarball_url,
-      app,
-      suspend_timeout,
-      retries - 1
-    )
-  end
-
-  defp maybe_retry(_machine_id, _region, _tarball_url, _app, _suspend_timeout, 0, error_result) do
-    error_result
-  end
-
-  defp format_response_body(body) when is_map(body) do
-    # Try to extract useful error info from response
-    cond do
-      body["error"] -> body["error"]
-      body["message"] -> body["message"]
-      true -> inspect(body) |> String.slice(0, 200)
-    end
-  end
-
-  defp format_response_body(body) when is_binary(body) do
-    String.slice(body, 0, 200)
-  end
-
-  defp format_response_body(body) do
-    inspect(body) |> String.slice(0, 200)
-  end
-
-  defp parse_machine_result(machine_id, region, body) do
-    stdout = body["stdout"] || ""
-    stderr = body["stderr"] || ""
-    exit_code = body["exit_code"]
-
-    # Parse JSON result from output
-    # Look for __FLY_DEPLOY_RESULT__<json>__FLY_DEPLOY_RESULT__
-    result =
-      case Regex.run(~r/__FLY_DEPLOY_RESULT__(.+)__FLY_DEPLOY_RESULT__/s, stdout) do
-        [_, json_str] ->
-          case JSON.decode(json_str) do
-            {:ok, data} ->
-              success = data["success"] && exit_code == 0
-
-              result = %{
-                machine_id: machine_id,
-                region: region,
-                success: success,
-                modules: data["modules_reloaded"],
-                module_names: data["module_names"] || [],
-                processes_succeeded: data["processes_succeeded"],
-                process_names: data["process_names"] || [],
-                processes_failed: data["processes_failed"],
-                suspend_duration_ms: data["suspend_duration_ms"]
-              }
-
-              # Add error info if failed
-              if success do
-                result
-              else
-                error_msg =
-                  [
-                    if(exit_code && exit_code != 0, do: "exit_code=#{exit_code}"),
-                    if(data["error"], do: data["error"]),
-                    if(stderr != "", do: "stderr: #{String.slice(stderr, 0, 300)}")
-                  ]
-                  |> Enum.reject(&is_nil/1)
-                  |> case do
-                    [] -> "Upgrade reported failure"
-                    parts -> Enum.join(parts, ", ")
-                  end
-
-                Map.put(result, :error, error_msg)
-              end
-
-            {:error, reason} ->
-              %{
-                machine_id: machine_id,
-                region: region,
-                success: false,
-                error: "Failed to decode JSON: #{inspect(reason)}, exit_code=#{exit_code}"
-              }
+          if is_new do
+            {Map.put(new_acc, machine_id, result), Map.put(collected_acc, machine_id, result)}
+          else
+            {new_acc, collected_acc}
           end
 
+        :not_found ->
+          {new_acc, collected_acc}
+      end
+    end)
+  end
+
+  defp fetch_machine_result(app, upgrade_id, bucket, machine_id) do
+    url = "#{s3_endpoint()}/#{bucket}/releases/#{app}-results/#{upgrade_id}/#{machine_id}.json"
+
+    case Req.get(url,
+           receive_timeout: 5_000,
+           connect_options: [timeout: 5_000],
+           aws_sigv4: [
+             access_key_id: aws_access_key_id(),
+             secret_access_key: aws_secret_access_key(),
+             service: "s3",
+             region: aws_region()
+           ]
+         ) do
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
+        {:ok, body}
+
+      {:ok, %{status: 404}} ->
+        :not_found
+
+      _ ->
+        :not_found
+    end
+  end
+
+  defp print_machine_result(machine_id, machine_regions, result) do
+    region = Map.get(machine_regions, machine_id, "???")
+    short_id = String.slice(machine_id, 0, 14)
+
+    case result["status"] do
+      "pending" ->
+        IO.puts(ansi([:yellow], "    ⏳ #{short_id} (#{region}) - upgrading..."))
+
+      "completed" ->
+        modules = result["modules_reloaded"] || 0
+        processes = result["processes_succeeded"] || 0
+        suspend_ms = result["suspend_duration_ms"]
+        suspend_info = if suspend_ms, do: ", suspended #{suspend_ms}ms", else: ""
+
+        IO.puts(
+          ansi(
+            [:green],
+            "    ✓ #{short_id} (#{region}) - #{modules} modules, #{processes} processes#{suspend_info}"
+          )
+        )
+
+      "failed" ->
+        error = result["error"] || "Unknown error"
+        IO.puts(ansi([:red], "    ✗ #{short_id} (#{region}) - FAILED"))
+        IO.puts(ansi([:red], "      #{error}"))
+    end
+  end
+
+  defp finalize_results(expected_ids, machine_regions, collected_results) do
+    Enum.map(expected_ids, fn machine_id ->
+      region = Map.get(machine_regions, machine_id, "???")
+
+      case Map.get(collected_results, machine_id) do
         nil ->
-          error_msg =
-            [
-              "No JSON result marker found",
-              if(exit_code && exit_code != 0, do: "exit_code=#{exit_code}"),
-              if(stderr != "", do: "stderr: #{String.slice(stderr, 0, 300)}"),
-              if(stdout != "",
-                do: "stdout: #{String.slice(stdout, 0, 300)}",
-                else: "stdout: (empty)"
-              )
-            ]
-            |> Enum.reject(&is_nil/1)
-            |> Enum.join(", ")
+          # Machine never reported - timeout
+          IO.puts(
+            ansi(
+              [:red],
+              "    ✗ #{String.slice(machine_id, 0, 14)} (#{region}) - TIMEOUT (no response)"
+            )
+          )
 
           %{
             machine_id: machine_id,
             region: region,
             success: false,
-            error: error_msg
+            error: "Timed out waiting for upgrade result"
+          }
+
+        %{"status" => "pending"} ->
+          # Machine started but never finished - timeout
+          IO.puts(
+            ansi(
+              [:red],
+              "    ✗ #{String.slice(machine_id, 0, 14)} (#{region}) - TIMEOUT (stuck in pending)"
+            )
+          )
+
+          %{
+            machine_id: machine_id,
+            region: region,
+            success: false,
+            error: "Timed out while upgrade was in progress"
+          }
+
+        result ->
+          %{
+            machine_id: machine_id,
+            region: region,
+            success: result["status"] == "completed",
+            modules: result["modules_reloaded"] || 0,
+            module_names: result["module_names"] || [],
+            processes_succeeded: result["processes_succeeded"] || 0,
+            process_names: result["process_names"] || [],
+            processes_failed: result["processes_failed"] || 0,
+            suspend_duration_ms: result["suspend_duration_ms"],
+            error: result["error"]
           }
       end
-
-    # print status for this machine
-    if result.success do
-      suspend_info =
-        if result.suspend_duration_ms,
-          do: ", suspended #{result.suspend_duration_ms}ms",
-          else: ""
-
-      IO.puts(
-        ansi(
-          [:green],
-          "    ✓ #{String.slice(machine_id, 0, 14)} (#{region}) - #{result.modules} modules, #{result.processes_succeeded} processes#{suspend_info}"
-        )
-      )
-    else
-      error_msg = Map.get(result, :error, "Unknown error")
-      IO.puts(ansi([:red], "    ✗ #{String.slice(machine_id, 0, 14)} (#{region}) - FAILED"))
-      IO.puts(ansi([:red], "      #{error_msg}"))
-    end
-
-    result
+    end)
   end
 
   defp print_summary(results, _tarball_info, duration) do
@@ -756,5 +740,96 @@ defmodule FlyDeploy.Orchestrator do
         IO.puts(ansi([:white], "    #{label}: #{count} (#{names_str})"))
       end
     end
+  end
+
+  defp cleanup_old_results(app, bucket, keep) do
+    prefix = "releases/#{app}-results/"
+
+    case list_s3_objects(bucket, prefix) do
+      {:ok, objects} ->
+        # Extract unique upgrade_ids from object keys
+        # Keys look like: releases/app-results/01KEW7VFV2K1D4NA9GKZYMFW3R/machine123.json
+        upgrade_ids =
+          objects
+          |> Enum.map(fn key ->
+            case String.split(key, "/") do
+              [_, _, upgrade_id, _] -> upgrade_id
+              _ -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+          |> Enum.sort()
+
+        if length(upgrade_ids) > keep do
+          # Deployment IDs are time-sortable, so keep the last N (most recent)
+          ids_to_delete = Enum.drop(upgrade_ids, -keep)
+          deleted_count = delete_results_for_upgrade_ids(bucket, prefix, ids_to_delete, objects)
+
+          if deleted_count > 0 do
+            IO.puts(ansi([:white], "    Cleaned up #{deleted_count} old result files"))
+          end
+        end
+
+      {:error, _reason} ->
+        # Silently ignore cleanup errors - not critical
+        :ok
+    end
+  end
+
+  defp list_s3_objects(bucket, prefix) do
+    url = "#{s3_endpoint()}/#{bucket}?list-type=2&prefix=#{URI.encode(prefix)}"
+
+    case Req.get(url,
+           receive_timeout: 10_000,
+           connect_options: [timeout: 10_000],
+           aws_sigv4: [
+             access_key_id: aws_access_key_id(),
+             secret_access_key: aws_secret_access_key(),
+             service: "s3",
+             region: aws_region()
+           ]
+         ) do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        # Parse XML response to extract object keys
+        keys =
+          Regex.scan(~r/<Key>([^<]+)<\/Key>/, body)
+          |> Enum.map(fn [_, key] -> key end)
+
+        {:ok, keys}
+
+      {:ok, %{status: status}} ->
+        {:error, {:http_error, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp delete_results_for_upgrade_ids(bucket, prefix, upgrade_ids, all_objects) do
+    # Find all objects belonging to the upgrade_ids we want to delete
+    objects_to_delete =
+      Enum.filter(all_objects, fn key ->
+        Enum.any?(upgrade_ids, fn id -> String.contains?(key, "#{prefix}#{id}/") end)
+      end)
+
+    # Delete each object
+    Enum.reduce(objects_to_delete, 0, fn key, count ->
+      url = "#{s3_endpoint()}/#{bucket}/#{key}"
+
+      case Req.delete(url,
+             receive_timeout: 5_000,
+             connect_options: [timeout: 5_000],
+             aws_sigv4: [
+               access_key_id: aws_access_key_id(),
+               secret_access_key: aws_secret_access_key(),
+               service: "s3",
+               region: aws_region()
+             ]
+           ) do
+        {:ok, %{status: status}} when status in 200..299 -> count + 1
+        _ -> count
+      end
+    end)
   end
 end
