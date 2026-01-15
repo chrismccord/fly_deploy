@@ -22,3 +22,5 @@ fly_deploy-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+test_app/priv/fly_deploy/lib/cache_buster.ex

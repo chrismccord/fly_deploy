@@ -342,76 +342,78 @@ defmodule FlyDeploy.Poller do
   end
 
   defp apply_upgrade(state, upgrade) do
-    tarball_url = upgrade["tarball_url"]
-    version = upgrade["version"]
+    # Define these first so they're available in rescue block
+    start_time = System.monotonic_time(:millisecond)
     source_image_ref = upgrade["source_image_ref"]
     upgrade_id = upgrade_id_from_ref(source_image_ref)
 
-    Logger.info("[FlyDeploy.Poller] Applying hot upgrade v#{version}...")
+    tarball_url = upgrade["tarball_url"]
+    version = upgrade["version"]
 
-    # Track timing from the start (before pending write, in case it fails)
-    start_time = System.monotonic_time(:millisecond)
+    Logger.info("[FlyDeploy.Poller] Applying hot upgrade v#{version}...")
 
     # Write pending status immediately so orchestrator knows we're working on it
     write_pending_status(state.app, upgrade_id)
 
-    case FlyDeploy.hot_upgrade(tarball_url, state.app, suspend_timeout: state.suspend_timeout) do
-      {:ok, result} ->
+    try do
+      case FlyDeploy.hot_upgrade(tarball_url, state.app, suspend_timeout: state.suspend_timeout) do
+        {:ok, result} ->
+          duration = System.monotonic_time(:millisecond) - start_time
+          Logger.info("[FlyDeploy.Poller] Hot upgrade v#{version} applied successfully")
+
+          # Update persistent_term with new version
+          base_image_ref = System.get_env("FLY_IMAGE_REF")
+          set_current_vsn(base_image_ref, source_image_ref, version)
+
+          # Write result to S3 for orchestrator to pick up
+          write_upgrade_result(state.app, upgrade_id, result, duration)
+
+          %{
+            state
+            | last_upgrade: DateTime.utc_now(),
+              upgrade_count: state.upgrade_count + 1
+          }
+
+        :ok ->
+          # Legacy return value (no result map)
+          duration = System.monotonic_time(:millisecond) - start_time
+          Logger.info("[FlyDeploy.Poller] Hot upgrade v#{version} applied successfully")
+
+          base_image_ref = System.get_env("FLY_IMAGE_REF")
+          set_current_vsn(base_image_ref, source_image_ref, version)
+
+          # Write basic result
+          write_upgrade_result(state.app, upgrade_id, %{}, duration)
+
+          %{
+            state
+            | last_upgrade: DateTime.utc_now(),
+              upgrade_count: state.upgrade_count + 1
+          }
+
+        {:error, reason} ->
+          duration = System.monotonic_time(:millisecond) - start_time
+          Logger.error("[FlyDeploy.Poller] Hot upgrade failed: #{inspect(reason)}")
+
+          # Write failure result to S3
+          write_upgrade_result(state.app, upgrade_id, %{error: inspect(reason)}, duration)
+
+          # Clear etag so next poll will re-fetch and retry the upgrade
+          %{state | etag: nil}
+      end
+    rescue
+      e ->
         duration = System.monotonic_time(:millisecond) - start_time
-        Logger.info("[FlyDeploy.Poller] Hot upgrade v#{version} applied successfully")
+        error_msg = Exception.format(:error, e, __STACKTRACE__)
 
-        # Update persistent_term with new version
-        base_image_ref = System.get_env("FLY_IMAGE_REF")
-        set_current_vsn(base_image_ref, source_image_ref, version)
+        Logger.error("[FlyDeploy.Poller] Hot upgrade crashed: #{error_msg}")
 
-        # Write result to S3 for orchestrator to pick up
-        write_upgrade_result(state.app, upgrade_id, result, duration)
-
-        %{
-          state
-          | last_upgrade: DateTime.utc_now(),
-            upgrade_count: state.upgrade_count + 1
-        }
-
-      :ok ->
-        # Legacy return value (no result map)
-        duration = System.monotonic_time(:millisecond) - start_time
-        Logger.info("[FlyDeploy.Poller] Hot upgrade v#{version} applied successfully")
-
-        base_image_ref = System.get_env("FLY_IMAGE_REF")
-        set_current_vsn(base_image_ref, source_image_ref, version)
-
-        # Write basic result
-        write_upgrade_result(state.app, upgrade_id, %{}, duration)
-
-        %{
-          state
-          | last_upgrade: DateTime.utc_now(),
-            upgrade_count: state.upgrade_count + 1
-        }
-
-      {:error, reason} ->
-        duration = System.monotonic_time(:millisecond) - start_time
-        Logger.error("[FlyDeploy.Poller] Hot upgrade failed: #{inspect(reason)}")
-
-        # Write failure result to S3
-        write_upgrade_result(state.app, upgrade_id, %{error: inspect(reason)}, duration)
+        # Write failure result to S3 so orchestrator knows what happened
+        write_upgrade_result(state.app, upgrade_id, %{error: error_msg}, duration)
 
         # Clear etag so next poll will re-fetch and retry the upgrade
         %{state | etag: nil}
     end
-  rescue
-    e ->
-      duration = System.monotonic_time(:millisecond) - start_time
-      error_msg = Exception.format(:error, e, __STACKTRACE__)
-
-      Logger.error("[FlyDeploy.Poller] Hot upgrade crashed: #{error_msg}")
-
-      # Write failure result to S3 so orchestrator knows what happened
-      write_upgrade_result(state.app, upgrade_id, %{error: error_msg}, duration)
-
-      # Clear etag so next poll will re-fetch and retry the upgrade
-      %{state | etag: nil}
   end
 
   defp upgrade_id_from_ref(source_image_ref) do

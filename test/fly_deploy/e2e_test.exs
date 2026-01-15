@@ -43,8 +43,14 @@ defmodule FlyDeploy.E2ETest do
     File.cp_r!(Path.join(src_dir, "lib"), Path.join(priv_fly_deploy_dir, "lib"))
 
     # Write a cache buster file to ensure Docker always rebuilds priv layer
-    cache_buster = Path.join(priv_fly_deploy_dir, ".cache_buster")
-    File.write!(cache_buster, "#{System.system_time(:nanosecond)}")
+    cache_buster = Path.join(priv_fly_deploy_dir, "lib/cache_buster.ex")
+
+    File.write!(cache_buster, """
+    defmodule FlyDeploy.E2ETestCacheBuster do
+      @bump #{System.system_time(:nanosecond)}
+      def bump, do: @bump
+    end
+    """)
 
     IO.puts("  ✓ Source files copied to priv/fly_deploy")
 
@@ -568,13 +574,13 @@ defmodule FlyDeploy.E2ETest do
 
   defp deploy_cold do
     IO.puts(
-      "  Running: fly deploy --remote-only --no-cache --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
+      "  Running: fly deploy --remote-only --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
     )
 
     {output, exit_code} =
       System.cmd(
         "fly",
-        ["deploy", "--remote-only", "--no-cache", "--smoke-checks=false", "-a", @app_name],
+        ["deploy", "--remote-only", "--smoke-checks=false", "-a", @app_name],
         cd: @test_app_dir,
         into: IO.stream()
       )
