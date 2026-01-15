@@ -1,3 +1,9 @@
+## 0.2.1 (2026-01-15)
+
+### Bug Fixes
+- Fix upgrade failures leaving machines "stuck in pending" - now writes error result to S3
+- Fix failed upgrades not retrying - clear ETag cache on failure to enable automatic retry on next poll
+
 ## 0.2.0 (2026-01-13)
 
 ### Breaking Changes

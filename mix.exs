@@ -4,7 +4,7 @@ defmodule FlyDeploy.MixProject do
   def project do
     [
       app: :fly_deploy,
-      version: "0.2.0",
+      version: "0.2.1",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

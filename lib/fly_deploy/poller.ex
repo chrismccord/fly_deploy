@@ -123,7 +123,8 @@ defmodule FlyDeploy.Poller do
       etag: nil,
       last_check: nil,
       last_upgrade: nil,
-      upgrade_count: 0
+      upgrade_count: 0,
+      check_error_logged: false
     }
 
     Logger.info("[FlyDeploy.Poller] Started with #{interval}ms poll interval for #{app}")
@@ -290,15 +291,19 @@ defmodule FlyDeploy.Poller do
   defp check_for_upgrade(state) do
     case fetch_current_state_with_etag(state.app, state.etag) do
       {:not_modified, etag} ->
-        %{state | etag: etag, last_check: DateTime.utc_now()}
+        %{state | etag: etag, last_check: DateTime.utc_now(), check_error_logged: false}
 
       {:ok, current, etag} ->
-        state = %{state | etag: etag, last_check: DateTime.utc_now()}
+        state = %{state | etag: etag, last_check: DateTime.utc_now(), check_error_logged: false}
         maybe_apply_upgrade(state, current)
 
       {:error, reason} ->
-        Logger.warning("[FlyDeploy.Poller] Failed to check for upgrade: #{inspect(reason)}")
-        %{state | last_check: DateTime.utc_now()}
+        # Only log the warning once to avoid spamming logs
+        if not state.check_error_logged do
+          Logger.warning("[FlyDeploy.Poller] Failed to check for upgrade: #{inspect(reason)}")
+        end
+
+        %{state | last_check: DateTime.utc_now(), check_error_logged: true}
     end
   end
 
@@ -344,10 +349,11 @@ defmodule FlyDeploy.Poller do
 
     Logger.info("[FlyDeploy.Poller] Applying hot upgrade v#{version}...")
 
+    # Track timing from the start (before pending write, in case it fails)
+    start_time = System.monotonic_time(:millisecond)
+
     # Write pending status immediately so orchestrator knows we're working on it
     write_pending_status(state.app, upgrade_id)
-
-    start_time = System.monotonic_time(:millisecond)
 
     case FlyDeploy.hot_upgrade(tarball_url, state.app, suspend_timeout: state.suspend_timeout) do
       {:ok, result} ->
@@ -390,15 +396,22 @@ defmodule FlyDeploy.Poller do
 
         # Write failure result to S3
         write_upgrade_result(state.app, upgrade_id, %{error: inspect(reason)}, duration)
-        state
+
+        # Clear etag so next poll will re-fetch and retry the upgrade
+        %{state | etag: nil}
     end
   rescue
     e ->
-      Logger.error(
-        "[FlyDeploy.Poller] Hot upgrade crashed: #{Exception.format(:error, e, __STACKTRACE__)}"
-      )
+      duration = System.monotonic_time(:millisecond) - start_time
+      error_msg = Exception.format(:error, e, __STACKTRACE__)
 
-      state
+      Logger.error("[FlyDeploy.Poller] Hot upgrade crashed: #{error_msg}")
+
+      # Write failure result to S3 so orchestrator knows what happened
+      write_upgrade_result(state.app, upgrade_id, %{error: error_msg}, duration)
+
+      # Clear etag so next poll will re-fetch and retry the upgrade
+      %{state | etag: nil}
   end
 
   defp upgrade_id_from_ref(source_image_ref) do
