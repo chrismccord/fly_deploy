@@ -1,4 +1,5 @@
 ## 0.2.2 (2026-01-16)
+- Handle case where code is already loaded from binary (ie copy pasta'd into iex remsh)
 - Use t3.storage.dev for more robust connections
 
 ## 0.2.1 (2026-01-15)
