@@ -55,7 +55,7 @@ defmodule FlyDeploy do
   - `FLY_APP_NAME` - Application name (auto-set by Fly)
 
   Optional:
-  - `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://fly.storage.tigris.dev`)
+  - `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://t3.storage.dev`)
   - `AWS_REGION` - AWS region (defaults to `auto` for Tigris)
 
   ### Setting Up Secrets
@@ -102,7 +102,7 @@ defmodule FlyDeploy do
       "hot_upgrade": {
         "version": "1.2.3",
         "source_image_ref": "registry.fly.io/my-app:deployment-01K94R...",
-        "tarball_url": "https://fly.storage.tigris.dev/bucket/releases/my_app-1.2.3.tar.gz",
+        "tarball_url": "https://t3.storage.dev/bucket/releases/my_app-1.2.3.tar.gz",
         "deployed_at": "2024-01-15T10:30:00Z"
       }
     }
@@ -419,7 +419,7 @@ defmodule FlyDeploy do
 
   defp s3_endpoint do
     Application.get_env(:fly_deploy, :aws_endpoint_url_s3) ||
-      System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
+      System.get_env("AWS_ENDPOINT_URL_S3", "https://t3.storage.dev")
   end
 
   defp aws_access_key_id do

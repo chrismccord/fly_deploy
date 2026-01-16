@@ -590,7 +590,7 @@ defmodule FlyDeploy.Poller do
 
   defp s3_endpoint do
     Application.get_env(:fly_deploy, :aws_endpoint_url_s3) ||
-      System.get_env("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev")
+      System.get_env("AWS_ENDPOINT_URL_S3", "https://t3.storage.dev")
   end
 
   defp aws_access_key_id do

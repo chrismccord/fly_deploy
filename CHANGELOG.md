@@ -1,3 +1,6 @@
+## 0.2.2 (2026-01-16)
+- Use t3.storage.dev for more robust connections
+
 ## 0.2.1 (2026-01-15)
 
 ### Bug Fixes

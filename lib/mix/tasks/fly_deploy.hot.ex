@@ -27,7 +27,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
   The `[env]` section is automatically read and passed to orchestrator machines:
 
       [env]
-        AWS_ENDPOINT_URL_S3 = "https://fly.storage.tigris.dev"
+        AWS_ENDPOINT_URL_S3 = "https://t3.storage.dev"
         AWS_REGION = "auto"
         AWS_BUCKET = "my-app-staging"
 

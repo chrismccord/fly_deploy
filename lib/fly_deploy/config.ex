@@ -28,7 +28,7 @@ defmodule FlyDeploy.Config do
         aws_endpoint_url_s3: System.get_env("CUSTOM_ENDPOINT"),  # Optional - defaults to AWS_ENDPOINT_URL_S3
         aws_region: System.get_env("CUSTOM_REGION"),  # Optional - defaults to "auto"
         env: %{
-          "AWS_ENDPOINT_URL_S3" => "https://fly.storage.tigris.dev",
+          "AWS_ENDPOINT_URL_S3" => "https://t3.storage.dev",
           "AWS_REGION" => "auto"
         }
 
@@ -52,7 +52,7 @@ defmodule FlyDeploy.Config do
   passed to the orchestrator machine:
 
       [env]
-        AWS_ENDPOINT_URL_S3 = "https://fly.storage.tigris.dev"
+        AWS_ENDPOINT_URL_S3 = "https://t3.storage.dev"
         AWS_REGION = "auto"
 
   Additional env vars can be added via Mix config using the `:env` key.

@@ -199,7 +199,7 @@ Required:
 - `FLY_IMAGE_REF` - Docker image reference (auto-set by Fly)
 
 Optional:
-- `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://fly.storage.tigris.dev`)
+- `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://t3.storage.dev`)
 - `AWS_REGION` - AWS region (defaults to `auto` for Tigris)
 
 ### fly.toml Configuration
@@ -208,7 +208,7 @@ Environment variables from your `[env]` section are automatically passed to the 
 
 ```toml
 [env]
-  AWS_ENDPOINT_URL_S3 = "https://fly.storage.tigris.dev"
+  AWS_ENDPOINT_URL_S3 = "https://t3.storage.dev"
   AWS_REGION = "auto"
 ```
 
@@ -350,7 +350,7 @@ Tracks current deployment state:
   "hot_upgrade": {
     "version": "1.2.3",
     "source_image_ref": "registry.fly.io/my-app:deployment-01K94R...",
-    "tarball_url": "https://fly.storage.tigris.dev/bucket/releases/my_app-1.2.3.tar.gz",
+    "tarball_url": "https://t3.storage.dev/bucket/releases/my_app-1.2.3.tar.gz",
     "deployed_at": "2024-01-15T10:30:00Z"
   }
 }
