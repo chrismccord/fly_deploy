@@ -1,4 +1,4 @@
-# Cache buster: 1768598913346336180
+# Cache buster: 1768601627731144224
 defmodule TestApp.Counter do
   @moduledoc """
   A simple GenServer counter for testing hot code upgrades.

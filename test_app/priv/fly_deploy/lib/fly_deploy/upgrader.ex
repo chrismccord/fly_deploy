@@ -111,16 +111,29 @@ defmodule FlyDeploy.Upgrader do
         module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
 
         case :code.which(module_name) do
-          path when is_list(path) ->
+          path when is_list(path) and path != [] ->
             # Existing module - copy to the loaded path
             loaded_path = List.to_string(path)
 
-            # Compare MD5s to avoid unnecessary copies
-            if beam_file_changed?(tarball_beam_path, module_name) do
-              File.cp!(tarball_beam_path, loaded_path)
-              {count + 1, new_mods}
+            # Guard against empty or invalid paths (can happen with load_binary edge cases)
+            if loaded_path != "" and File.exists?(Path.dirname(loaded_path)) do
+              # Compare MD5s to avoid unnecessary copies
+              if beam_file_changed?(tarball_beam_path, module_name) do
+                File.cp!(tarball_beam_path, loaded_path)
+                {count + 1, new_mods}
+              else
+                {count, new_mods}
+              end
             else
-              {count, new_mods}
+              # Path is invalid - treat as new module
+              dest_path = Path.join(app_ebin_dir, beam_filename)
+              File.cp!(tarball_beam_path, dest_path)
+
+              Logger.info(
+                "[#{inspect(__MODULE__)}] Copied module with invalid path: #{module_name} -> #{dest_path}"
+              )
+
+              {count + 1, [{module_name, dest_path} | new_mods]}
             end
 
           _ ->
@@ -312,15 +325,28 @@ defmodule FlyDeploy.Upgrader do
         module_name = beam_filename |> String.replace_suffix(".beam", "") |> String.to_atom()
 
         case :code.which(module_name) do
-          path when is_list(path) ->
+          path when is_list(path) and path != [] ->
             loaded_path = List.to_string(path)
 
-            # Compare MD5s to avoid unnecessary copies
-            if beam_file_changed?(tarball_beam_path, module_name) do
-              File.cp!(tarball_beam_path, loaded_path)
-              {count + 1, new_mods}
+            # Guard against empty or invalid paths (can happen with load_binary edge cases)
+            if loaded_path != "" and File.exists?(Path.dirname(loaded_path)) do
+              # Compare MD5s to avoid unnecessary copies
+              if beam_file_changed?(tarball_beam_path, module_name) do
+                File.cp!(tarball_beam_path, loaded_path)
+                {count + 1, new_mods}
+              else
+                {count, new_mods}
+              end
             else
-              {count, new_mods}
+              # Path is invalid - treat as new module
+              dest_path = Path.join(app_ebin_dir, beam_filename)
+              File.cp!(tarball_beam_path, dest_path)
+
+              Logger.info(
+                "[#{inspect(__MODULE__)}] Copied module with invalid path: #{module_name} -> #{dest_path}"
+              )
+
+              {count + 1, [{module_name, dest_path} | new_mods]}
             end
 
           _ ->

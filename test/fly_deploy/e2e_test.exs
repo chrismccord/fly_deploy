@@ -574,13 +574,13 @@ defmodule FlyDeploy.E2ETest do
 
   defp deploy_cold do
     IO.puts(
-      "  Running: fly deploy --remote-only --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
+      "  Running: fly deploy --no-cache --remote-only --smoke-checks=false -a #{@app_name} (inside #{@test_app_dir})"
     )
 
     {output, exit_code} =
       System.cmd(
         "fly",
-        ["deploy", "--remote-only", "--smoke-checks=false", "-a", @app_name],
+        ["deploy", "--no-cache", "--remote-only", "--smoke-checks=false", "-a", @app_name],
         cd: @test_app_dir,
         into: IO.stream()
       )
