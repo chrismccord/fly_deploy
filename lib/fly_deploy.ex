@@ -449,6 +449,7 @@ defmodule FlyDeploy do
       case Req.get(url,
              receive_timeout: 10_000,
              connect_options: [timeout: 10_000],
+             headers: [{"x-tigris-consistent", "true"}],
              aws_sigv4: [
                access_key_id: aws_access_key_id(),
                secret_access_key: aws_secret_access_key(),

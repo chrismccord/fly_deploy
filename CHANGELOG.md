@@ -1,3 +1,9 @@
+## 0.2.3 (2026-01-27)
+
+### Bug Fixes
+- Fix lack of x-tigris-consistent header on tigris leading to race conditions on applying
+the latest deploy and reporting pending/failed upgrades
+
 ## 0.2.2 (2026-01-16)
 - Handle case where code is already loaded from binary (ie copy pasta'd into iex remsh)
 - Use t3.storage.dev for more robust connections

@@ -58,6 +58,8 @@ defmodule FlyDeploy.Upgrader do
         connect_options: [timeout: 30_000],
         retry: :transient,
         max_retries: 2,
+        # Force strong consistency on Tigris to avoid reading stale/incomplete tarballs
+        headers: [{"x-tigris-consistent", "true"}],
         aws_sigv4: [
           access_key_id: aws_access_key_id(),
           secret_access_key: aws_secret_access_key(),
@@ -273,6 +275,8 @@ defmodule FlyDeploy.Upgrader do
         connect_options: [timeout: 30_000],
         retry: :transient,
         max_retries: 2,
+        # Force strong consistency on Tigris to avoid reading stale/incomplete tarballs
+        headers: [{"x-tigris-consistent", "true"}],
         aws_sigv4: [
           access_key_id: aws_access_key_id(),
           secret_access_key: aws_secret_access_key(),
