@@ -118,6 +118,7 @@ defmodule FlyDeploy.Orchestrator do
     case Req.get(url,
            receive_timeout: 10_000,
            connect_options: [timeout: 10_000],
+           headers: [{"x-tigris-consistent", "true"}],
            aws_sigv4: aws_opts
          ) do
       {:ok, %{status: 200, body: body}} when is_map(body) ->
@@ -204,7 +205,7 @@ defmodule FlyDeploy.Orchestrator do
            receive_timeout: 10_000,
            connect_options: [timeout: 10_000],
            json: lock_content,
-           headers: [{"content-type", "application/json"}],
+           headers: [{"content-type", "application/json"}, {"x-tigris-consistent", "true"}],
            aws_sigv4: aws_opts
          ) do
       {:ok, %{status: status}} when status in 200..299 ->
@@ -236,6 +237,7 @@ defmodule FlyDeploy.Orchestrator do
     case Req.delete(url,
            receive_timeout: 10_000,
            connect_options: [timeout: 10_000],
+           headers: [{"x-tigris-consistent", "true"}],
            aws_sigv4: aws_opts
          ) do
       {:ok, %{status: status}} when status in 200..299 ->
@@ -341,7 +343,7 @@ defmodule FlyDeploy.Orchestrator do
         receive_timeout: 60_000,
         connect_options: [timeout: 60_000],
         body: content,
-        headers: [{"content-type", "application/gzip"}],
+        headers: [{"content-type", "application/gzip"}, {"x-tigris-consistent", "true"}],
         aws_sigv4: [
           access_key_id: aws_access_key_id(),
           secret_access_key: aws_secret_access_key(),
@@ -377,6 +379,7 @@ defmodule FlyDeploy.Orchestrator do
       case Req.get(url,
              receive_timeout: 10_000,
              connect_options: [timeout: 10_000],
+             headers: [{"x-tigris-consistent", "true"}],
              aws_sigv4: aws_opts
            ) do
         {:ok, %{status: 200, body: body}} when is_map(body) ->
@@ -419,7 +422,7 @@ defmodule FlyDeploy.Orchestrator do
         receive_timeout: 60_000,
         connect_options: [timeout: 60_000],
         json: updated,
-        headers: [{"content-type", "application/json"}],
+        headers: [{"content-type", "application/json"}, {"x-tigris-consistent", "true"}],
         aws_sigv4: aws_opts
       )
 
@@ -585,6 +588,7 @@ defmodule FlyDeploy.Orchestrator do
     case Req.get(url,
            receive_timeout: 5_000,
            connect_options: [timeout: 5_000],
+           headers: [{"x-tigris-consistent", "true"}],
            aws_sigv4: [
              access_key_id: aws_access_key_id(),
              secret_access_key: aws_secret_access_key(),
@@ -783,6 +787,7 @@ defmodule FlyDeploy.Orchestrator do
     case Req.get(url,
            receive_timeout: 10_000,
            connect_options: [timeout: 10_000],
+           headers: [{"x-tigris-consistent", "true"}],
            aws_sigv4: [
              access_key_id: aws_access_key_id(),
              secret_access_key: aws_secret_access_key(),
@@ -820,6 +825,7 @@ defmodule FlyDeploy.Orchestrator do
       case Req.delete(url,
              receive_timeout: 5_000,
              connect_options: [timeout: 5_000],
+             headers: [{"x-tigris-consistent", "true"}],
              aws_sigv4: [
                access_key_id: aws_access_key_id(),
                secret_access_key: aws_secret_access_key(),

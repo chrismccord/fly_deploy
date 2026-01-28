@@ -205,7 +205,7 @@ defmodule FlyDeploy.Poller do
              receive_timeout: 10_000,
              connect_options: [timeout: 10_000],
              json: state,
-             headers: [{"content-type", "application/json"}],
+             headers: [{"content-type", "application/json"}, {"x-tigris-consistent", "true"}],
              aws_sigv4: [
                access_key_id: aws_access_key_id(),
                secret_access_key: aws_secret_access_key(),
@@ -236,6 +236,7 @@ defmodule FlyDeploy.Poller do
       case Req.get(url,
              receive_timeout: 10_000,
              connect_options: [timeout: 10_000],
+             headers: [{"x-tigris-consistent", "true"}],
              aws_sigv4: [
                access_key_id: aws_access_key_id(),
                secret_access_key: aws_secret_access_key(),
@@ -450,7 +451,7 @@ defmodule FlyDeploy.Poller do
              receive_timeout: 5_000,
              connect_options: [timeout: 5_000],
              json: pending_data,
-             headers: [{"content-type", "application/json"}],
+             headers: [{"content-type", "application/json"}, {"x-tigris-consistent", "true"}],
              aws_sigv4: [
                access_key_id: aws_access_key_id(),
                secret_access_key: aws_secret_access_key(),
@@ -501,7 +502,7 @@ defmodule FlyDeploy.Poller do
              receive_timeout: 10_000,
              connect_options: [timeout: 10_000],
              json: result_data,
-             headers: [{"content-type", "application/json"}],
+             headers: [{"content-type", "application/json"}, {"x-tigris-consistent", "true"}],
              aws_sigv4: [
                access_key_id: aws_access_key_id(),
                secret_access_key: aws_secret_access_key(),
@@ -530,11 +531,12 @@ defmodule FlyDeploy.Poller do
       url = "#{s3_endpoint()}/#{bucket}/releases/#{app}-current.json"
 
       headers =
-        if etag do
-          [{"if-none-match", etag}]
-        else
-          []
-        end
+        [{"x-tigris-consistent", "true"}] ++
+          if etag do
+            [{"if-none-match", etag}]
+          else
+            []
+          end
 
       case Req.get(url,
              receive_timeout: 10_000,

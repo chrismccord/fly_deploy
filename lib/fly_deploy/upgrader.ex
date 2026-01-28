@@ -38,6 +38,15 @@ defmodule FlyDeploy.Upgrader do
     do_hot_upgrade(tarball_url, app, opts)
   rescue
     e ->
+      Logger.error("""
+      [#{inspect(__MODULE__)}] Hot upgrade failed!
+        App: #{inspect(app)}
+        Tarball: #{tarball_url}
+        Error: #{Exception.message(e)}
+        Stacktrace:
+      #{Exception.format_stacktrace(__STACKTRACE__)}
+      """)
+
       {:error, Exception.message(e)}
   end
 
@@ -75,17 +84,16 @@ defmodule FlyDeploy.Upgrader do
     IO.puts("  Downloaded: #{download_size} bytes")
 
     IO.puts("Extracting...")
+    # Clean up any stale files from previous upgrades
+    File.rm_rf!(upgrade_dir)
     File.mkdir_p!(upgrade_dir)
-    :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
+    :ok = :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
     # Copy marker file to /app to prove upgrade was applied on this machine
     marker_src = Path.join(upgrade_dir, "fly_deploy_marker.json")
     marker_dest = "/app/fly_deploy_marker.json"
-
-    if File.exists?(marker_src) do
-      File.cp!(marker_src, marker_dest)
-      Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
-    end
+    File.cp!(marker_src, marker_dest)
+    Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
@@ -246,16 +254,19 @@ defmodule FlyDeploy.Upgrader do
   2. Doesn't need to suspend/resume processes (they don't exist yet)
   """
   def replay_upgrade_startup(tarball_url, app) do
-    try do
-      do_replay_upgrade_startup(tarball_url, app)
-    rescue
-      e ->
-        IO.puts("Error during startup hot upgrade replay:")
-        IO.puts("  #{Exception.message(e)}")
-        IO.puts("\nStacktrace:")
-        IO.puts(Exception.format_stacktrace(__STACKTRACE__))
-        reraise e, __STACKTRACE__
-    end
+    do_replay_upgrade_startup(tarball_url, app)
+  rescue
+    e ->
+      Logger.error("""
+      [#{inspect(__MODULE__)}] Startup hot upgrade replay failed!
+        App: #{inspect(app)}
+        Tarball: #{tarball_url}
+        Error: #{Exception.message(e)}
+        Stacktrace:
+      #{Exception.format_stacktrace(__STACKTRACE__)}
+      """)
+
+      reraise e, __STACKTRACE__
   end
 
   defp do_replay_upgrade_startup(tarball_url, app) do
@@ -291,17 +302,16 @@ defmodule FlyDeploy.Upgrader do
 
     # extract tarball
     IO.puts("Extracting...")
+    # Clean up any stale files from previous upgrades
+    File.rm_rf!(upgrade_dir)
     File.mkdir_p!(upgrade_dir)
-    :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
+    :ok = :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
     # Copy marker file to /app to prove upgrade was applied on this machine
     marker_src = Path.join(upgrade_dir, "fly_deploy_marker.json")
     marker_dest = "/app/fly_deploy_marker.json"
-
-    if File.exists?(marker_src) do
-      File.cp!(marker_src, marker_dest)
-      Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
-    end
+    File.cp!(marker_src, marker_dest)
+    Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
@@ -479,92 +489,135 @@ defmodule FlyDeploy.Upgrader do
     processes = find_processes_to_upgrade(changed_modules)
     Logger.info("[#{inspect(__MODULE__)}] Found #{length(processes)} processes to upgrade")
 
-    # phase 1: Suspend ALL processes
+    # phase 1: Suspend all processes in parallel
+    # Sequential suspension with 10s timeouts can take forever if processes are unresponsive
     suspend_start = System.monotonic_time(:millisecond)
-    Logger.info("[#{inspect(__MODULE__)}] Phase 1: Suspending all processes...")
+
+    Logger.info(
+      "[#{inspect(__MODULE__)}] Phase 1: Suspending #{length(processes)} processes in parallel..."
+    )
 
     suspended_processes =
-      Enum.map(processes, fn {pid, module} ->
-        try do
-          :sys.suspend(pid, suspend_timeout)
-          Logger.info("[#{inspect(__MODULE__)}] Suspended process #{inspect(pid)} (#{module})")
-          {:ok, pid, module}
-        catch
-          :exit, reason ->
-            Logger.warning(
-              "[#{inspect(__MODULE__)}] Failed to suspend process #{inspect(pid)} (#{module}): #{inspect(reason)} - skipping"
-            )
+      processes
+      |> Task.async_stream(
+        fn {pid, module} ->
+          try do
+            :sys.suspend(pid, suspend_timeout)
+            Logger.info("[#{inspect(__MODULE__)}] Suspended process #{inspect(pid)} (#{module})")
+            {:ok, pid, module}
+          catch
+            :exit, reason ->
+              Logger.warning(
+                "[#{inspect(__MODULE__)}] Failed to suspend process #{inspect(pid)} (#{module}): #{inspect(reason)} - skipping"
+              )
 
-            {:error, pid, module}
-        end
+              {:error, pid, module}
+          end
+        end,
+        max_concurrency: 100,
+        timeout: suspend_timeout + 1000,
+        on_timeout: :kill_task
+      )
+      |> Enum.map(fn
+        {:ok, result} -> result
+        {:exit, :timeout} -> {:error, nil, :task_timeout}
       end)
 
     successfully_suspended =
       suspended_processes
       |> Enum.filter(fn {status, _, _} -> status == :ok end)
 
+    failed_count = length(suspended_processes) - length(successfully_suspended)
+
     Logger.info(
-      "[#{inspect(__MODULE__)}] Suspended #{length(successfully_suspended)} processes successfully"
+      "[#{inspect(__MODULE__)}] Suspended #{length(successfully_suspended)} processes successfully, #{failed_count} failed/skipped"
     )
 
-    # phase 2: Reload ALL changed modules (while all processes are suspended)
-    Logger.info("[#{inspect(__MODULE__)}] Phase 2: Reloading all modules...")
-
-    # reload regular changed modules
-    # Use load_binary instead of load_file for reliability in embedded mode
-    Enum.each(changed_modules, fn module ->
-      Logger.info("[#{inspect(__MODULE__)}] Reloading module: #{module}")
-      :code.purge(module)
-
-      # Get the beam path and load via binary for embedded mode compatibility
-      case :code.which(module) do
-        path when is_list(path) ->
-          beam_path = List.to_string(path)
-          beam_binary = File.read!(beam_path)
-          {:module, ^module} = :code.load_binary(module, path, beam_binary)
-
-        _ ->
-          # Fallback to load_file if path unknown (shouldn't happen for changed modules)
-          {:module, ^module} = :code.load_file(module)
-      end
-    end)
-
-    # reload consolidated protocols (they may not show up in :code.modified_modules)
-    reload_consolidated_protocols()
-
-    # phase 3: Upgrade all processes (call code_change on each)
-    Logger.info("[#{inspect(__MODULE__)}] Phase 3: Upgrading all processes...")
-
+    # Wrap phases 2-3 in try/after to guarantee processes are resumed even if something fails
+    # Leaving processes suspended is catastrophic - their message queues pile up forever
     upgrade_results =
-      Enum.map(successfully_suspended, fn {:ok, pid, module} ->
-        try do
-          :sys.change_code(pid, module, :undefined, [])
-          Logger.info("[#{inspect(__MODULE__)}] Upgraded process #{inspect(pid)} (#{module})")
-          {:ok, pid, module}
-        rescue
-          e ->
-            Logger.error(
-              "[#{inspect(__MODULE__)}] Failed to upgrade process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
-            )
-
-            {:error, pid, module}
-        end
-      end)
-
-    # phase 4: Resume all processes (even failed ones, to avoid leaving them suspended)
-    Logger.info("[#{inspect(__MODULE__)}] Phase 4: Resuming all processes...")
-
-    Enum.each(successfully_suspended, fn {:ok, pid, module} ->
       try do
-        :sys.resume(pid)
-        Logger.info("[#{inspect(__MODULE__)}] Resumed process #{inspect(pid)} (#{module})")
-      rescue
-        e ->
-          Logger.error(
-            "[#{inspect(__MODULE__)}] Failed to resume process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
-          )
+        # phase 2: Reload ALL changed modules (while all processes are suspended)
+        Logger.info("[#{inspect(__MODULE__)}] Phase 2: Reloading all modules...")
+
+        # reload regular changed modules
+        # Use load_binary instead of load_file for reliability in embedded mode
+        Enum.each(changed_modules, fn module ->
+          Logger.info("[#{inspect(__MODULE__)}] Reloading module: #{module}")
+          :code.purge(module)
+
+          # Get the beam path and load via binary for embedded mode compatibility
+          case :code.which(module) do
+            path when is_list(path) ->
+              beam_path = List.to_string(path)
+              beam_binary = File.read!(beam_path)
+              {:module, ^module} = :code.load_binary(module, path, beam_binary)
+
+            _ ->
+              # Fallback to load_file if path unknown (shouldn't happen for changed modules)
+              {:module, ^module} = :code.load_file(module)
+          end
+        end)
+
+        # reload consolidated protocols (they may not show up in :code.modified_modules)
+        reload_consolidated_protocols()
+
+        # phase 3: Upgrade all processes (call code_change on each)
+        Logger.info("[#{inspect(__MODULE__)}] Phase 3: Upgrading all processes...")
+
+        Enum.map(successfully_suspended, fn {:ok, pid, module} ->
+          try do
+            :sys.change_code(pid, module, :undefined, [])
+            Logger.info("[#{inspect(__MODULE__)}] Upgraded process #{inspect(pid)} (#{module})")
+            {:ok, pid, module}
+          rescue
+            e ->
+              Logger.error(
+                "[#{inspect(__MODULE__)}] Failed to upgrade process #{inspect(pid)} (#{module}): #{Exception.message(e)}"
+              )
+
+              {:error, pid, module}
+          end
+        end)
+      after
+        # phase 4: Resume only processes that are actually suspended, IN PARALLEL
+        # Use get_status to check - suspended processes can still respond to system messages
+        Logger.info(
+          "[#{inspect(__MODULE__)}] Phase 4: Checking and resuming suspended processes in parallel..."
+        )
+
+        processes
+        |> Task.async_stream(
+          fn {pid, module} ->
+            try do
+              case :sys.get_status(pid, 1_000) do
+                {:status, ^pid, _, [_, :suspended | _]} ->
+                  :sys.resume(pid, 5_000)
+
+                  Logger.info(
+                    "[#{inspect(__MODULE__)}] Resumed process #{inspect(pid)} (#{module})"
+                  )
+
+                {:status, ^pid, _, _} ->
+                  # Not suspended, nothing to do
+                  :ok
+              end
+            catch
+              :exit, {:noproc, _} ->
+                :ok
+
+              :exit, reason ->
+                Logger.warning(
+                  "[#{inspect(__MODULE__)}] Could not check/resume #{inspect(pid)} (#{module}): #{inspect(reason)}"
+                )
+            end
+          end,
+          max_concurrency: 100,
+          timeout: 10_000,
+          on_timeout: :kill_task
+        )
+        |> Stream.run()
       end
-    end)
 
     suspend_end = System.monotonic_time(:millisecond)
     suspend_duration_ms = suspend_end - suspend_start

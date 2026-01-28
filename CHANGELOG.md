@@ -1,3 +1,9 @@
+## 0.2.4 (2026-01-27)
+- Better logging on failures
+- Do not allow processes to be stuck in suspended state
+- Suspend and resume in parallel for faster upgrades, which prevents in single
+  process or set of processes from failing the upgrade with timeouts
+
 ## 0.2.3 (2026-01-27)
 
 ### Bug Fixes
