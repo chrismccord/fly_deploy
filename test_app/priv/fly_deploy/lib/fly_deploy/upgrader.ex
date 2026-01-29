@@ -479,7 +479,7 @@ defmodule FlyDeploy.Upgrader do
   # - `processes_skipped` - Number of processes skipped (not GenServer/proc_lib)
   defp safe_upgrade_application(app, opts) do
     Logger.info("[#{inspect(__MODULE__)}] Starting safe upgrade for #{app}")
-    suspend_timeout = Keyword.get(opts, :suspend_timeout, 10_000)
+    suspend_timeout = Keyword.get(opts, :suspend_timeout, 3_000)
 
     # detect changed modules
     changed_modules = :code.modified_modules()
@@ -489,7 +489,7 @@ defmodule FlyDeploy.Upgrader do
     processes = find_processes_to_upgrade(changed_modules)
     Logger.info("[#{inspect(__MODULE__)}] Found #{length(processes)} processes to upgrade")
 
-    # phase 1: Suspend ALL processes IN PARALLEL
+    # phase 1: Suspend all processes in parallel
     # Sequential suspension with 10s timeouts can take forever if processes are unresponsive
     suspend_start = System.monotonic_time(:millisecond)
 
@@ -507,10 +507,7 @@ defmodule FlyDeploy.Upgrader do
             {:ok, pid, module}
           catch
             :exit, reason ->
-              Logger.warning(
-                "[#{inspect(__MODULE__)}] Failed to suspend process #{inspect(pid)} (#{module}): #{inspect(reason)} - skipping"
-              )
-
+              log_stuck_process(pid, module, :suspend, reason)
               {:error, pid, module}
           end
         end,
@@ -533,7 +530,7 @@ defmodule FlyDeploy.Upgrader do
       "[#{inspect(__MODULE__)}] Suspended #{length(successfully_suspended)} processes successfully, #{failed_count} failed/skipped"
     )
 
-    # Wrap phases 2-3 in try/after to GUARANTEE processes are resumed even if something fails
+    # Wrap phases 2-3 in try/after to guarantee processes are resumed even if something fails
     # Leaving processes suspended is catastrophic - their message queues pile up forever
     upgrade_results =
       try do
@@ -592,7 +589,7 @@ defmodule FlyDeploy.Upgrader do
             try do
               case :sys.get_status(pid, 1_000) do
                 {:status, ^pid, _, [_, :suspended | _]} ->
-                  :sys.resume(pid, 5_000)
+                  :sys.resume(pid, 3_000)
 
                   Logger.info(
                     "[#{inspect(__MODULE__)}] Resumed process #{inspect(pid)} (#{module})"
@@ -607,13 +604,11 @@ defmodule FlyDeploy.Upgrader do
                 :ok
 
               :exit, reason ->
-                Logger.warning(
-                  "[#{inspect(__MODULE__)}] Could not check/resume #{inspect(pid)} (#{module}): #{inspect(reason)}"
-                )
+                log_stuck_process(pid, module, :resume, reason)
             end
           end,
           max_concurrency: 100,
-          timeout: 10_000,
+          timeout: 8_000,
           on_timeout: :kill_task
         )
         |> Stream.run()
@@ -834,5 +829,35 @@ defmodule FlyDeploy.Upgrader do
       nil ->
         Logger.info("[#{inspect(__MODULE__)}] No application module found for #{app}")
     end
+  end
+
+  # Log detailed process info when suspend/resume fails to help debug stuck processes
+  defp log_stuck_process(pid, module, operation, reason) do
+    process_info =
+      case Process.info(pid, [:current_function, :current_stacktrace, :message_queue_len, :status]) do
+        nil ->
+          "process dead"
+
+        info ->
+          current_fn = Keyword.get(info, :current_function)
+          stack = Keyword.get(info, :current_stacktrace, [])
+          queue_len = Keyword.get(info, :message_queue_len, 0)
+          status = Keyword.get(info, :status)
+
+          stack_str =
+            stack
+            |> Enum.take(5)
+            |> Enum.map_join("\n        ", fn {mod, fun, arity, location} ->
+              file = Keyword.get(location, :file, ~c"?")
+              line = Keyword.get(location, :line, 0)
+              "#{mod}.#{fun}/#{arity} (#{file}:#{line})"
+            end)
+
+          "status=#{status}, queue_len=#{queue_len}, current_function=#{inspect(current_fn)}\n      stacktrace:\n        #{stack_str}"
+      end
+
+    Logger.warning(
+      "[#{inspect(__MODULE__)}] Failed to #{operation} #{inspect(pid)} (#{module}): #{inspect(reason)} - #{process_info}"
+    )
   end
 end

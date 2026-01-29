@@ -1,3 +1,6 @@
+## 0.2.5 (2026-01-29)
+- Log specific process info for processes timing out on suspend/resume
+
 ## 0.2.4 (2026-01-27)
 - Better logging on failures
 - Do not allow processes to be stuck in suspended state
