@@ -51,6 +51,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * `--dry-run` - Show what would be done without executing
     * `--force` - Override deployment lock (use with caution)
     * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
+    * `--buildkit` - Use buildkit based Fly builder
 
   ## Required Setup
 
@@ -99,7 +100,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           max_concurrency: :integer,
           timeout: :integer,
           force: :boolean,
-          lock_timeout: :integer
+          lock_timeout: :integer,
+          buildkit: :boolean,
         ]
       )
 
@@ -197,7 +199,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     build_args = Keyword.get_values(opts, :build_arg)
     build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
 
-    all_args = base_args ++ build_arg_flags
+    all_args = base_args ++ build_arg_flags ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it
