@@ -1,11 +1,11 @@
-# Cache buster: 1772046449320823083
+# Cache buster: 1772046647688165266
 defmodule TestApp.Counter do
   @moduledoc """
   A simple GenServer counter for testing deploys.
   """
   use GenServer
 
-  @counter_vsn "v1"
+  @counter_vsn "v3"
 
   defmodule State do
     @moduledoc false
@@ -36,7 +36,7 @@ defmodule TestApp.Counter do
 
   @impl true
   def init(_opts) do
-    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v1"}}
+    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v3"}}
   end
 
   @impl true
@@ -70,6 +70,6 @@ end
 
 defimpl String.Chars, for: TestApp.Counter.State do
   def to_string(%TestApp.Counter.State{} = state) do
-    "Counter[count=#{state.count}, version=#{state.version}, protocol_v=#{state.protocol_version}]"
+    "CounterV2[count=#{state.count}, version=#{state.version}, protocol_v=#{state.protocol_version}]"
   end
 end

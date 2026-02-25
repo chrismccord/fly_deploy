@@ -1,13 +1,13 @@
-/* Test App CSS - v1 */
+/* Test App CSS - v3 */
 body {
   font-family: sans-serif;
   background: #ffffff;
 }
 
 .version-marker {
-  content: "v1";
+  content: "v3";
 }
 
-.v1-only {
+.v3-only {
   display: block;
 }

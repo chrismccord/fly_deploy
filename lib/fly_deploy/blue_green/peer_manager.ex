@@ -617,11 +617,48 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     sys_config = Path.join(vsn_dir, "sys.config")
 
     if File.exists?(sys_config) do
-      # -config expects path without .config extension
-      sys = String.replace_trailing(sys_config, ".config", "") |> String.to_charlist()
+      # Strip config_providers from sys.config before passing to the peer.
+      # With -config, the kernel processes config_providers (OTP 21+), which
+      # calls Config.Provider.Elixir and triggers validate_compile_env. This
+      # produces errors when runtime.exs overrides compile-time values (e.g.,
+      # api_host differs between prod and staging). We handle config loading
+      # manually in load_release_config instead.
+      peer_config = strip_config_providers(sys_config)
+      sys = String.replace_trailing(peer_config, ".config", "") |> String.to_charlist()
       args ++ [~c"-config", sys]
     else
       args
+    end
+  end
+
+  # Writes a copy of sys.config with config_providers entries removed.
+  # This gives the kernel all static app config at boot (logger, kernel, etc.)
+  # without triggering Elixir's config provider machinery.
+  defp strip_config_providers(sys_config_path) do
+    case :file.consult(String.to_charlist(sys_config_path)) do
+      {:ok, [configs]} when is_list(configs) ->
+        stripped =
+          Enum.map(configs, fn
+            {app, kvs} when is_atom(app) and is_list(kvs) ->
+              {app, Keyword.delete(kvs, :config_providers)}
+
+            other ->
+              other
+          end)
+
+        tmp_path =
+          Path.join(
+            System.tmp_dir!(),
+            "fly_deploy_peer_#{:erlang.unique_integer([:positive])}.config"
+          )
+
+        content = :io_lib.format(~c"~p.~n", [stripped]) |> IO.iodata_to_binary()
+        File.write!(tmp_path, content)
+        tmp_path
+
+      _ ->
+        # Can't parse, use original
+        sys_config_path
     end
   end
 
@@ -719,7 +756,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         case :file.consult(String.to_charlist(sys_config_path)) do
           {:ok, [configs]} when is_list(configs) ->
             for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
-              for {key, val} <- kvs do
+              for {key, val} <- kvs, key != :config_providers do
                 Application.put_env(app, key, val, persistent: true)
               end
             end

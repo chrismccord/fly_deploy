@@ -40,6 +40,8 @@ defmodule TestApp.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:req, "~> 0.5"},
+      {:nimble_csv, "~> 1.2"},
+      {:bcrypt_elixir, "~> 3.2"},
       {:fly_deploy, path: "priv/fly_deploy"}
     ]
   end
