@@ -110,55 +110,36 @@ defmodule FlyDeploy.Poller do
     suspend_timeout = Keyword.get(opts, :suspend_timeout, 10_000)
     mode = Keyword.get(opts, :mode, :hot)
 
-    # If we're in a peer node, the parent's Poller (in BlueGreen.Supervisor)
-    # handles upgrades. This Poller becomes a no-op to avoid interfering.
-    if Application.get_env(:fly_deploy, :__role__) == :peer do
-      Logger.info("[FlyDeploy.Poller] Running in peer node — parent handles upgrades")
-
-      {:ok,
-       %{
-         app: app,
-         interval: interval,
-         suspend_timeout: suspend_timeout,
-         mode: :peer,
-         etag: nil,
-         last_check: nil,
-         last_upgrade: nil,
-         upgrade_count: 0,
-         check_error_logged: false
-       }}
+    if mode == :blue_green do
+      # In blue-green mode, just initialize image_ref tracking in S3
+      # so the Poller can detect new upgrades. Don't apply hot upgrades —
+      # the PeerManager handles code loading via peer nodes.
+      startup_initialize_image_ref(app)
     else
-      if mode == :blue_green do
-        # In blue-green mode, just initialize image_ref tracking in S3
-        # so the Poller can detect new upgrades. Don't apply hot upgrades —
-        # the PeerManager handles code loading via peer nodes.
-        startup_initialize_image_ref(app)
-      else
-        # BLOCKING: Apply any pending hot upgrade before supervision tree continues
-        # This ensures new code is loaded before other processes start
-        startup_apply_current(app)
-      end
-
-      # Initialize current_vsn from environment and local marker
-      init_current_vsn()
-
-      state = %{
-        app: app,
-        interval: interval,
-        suspend_timeout: suspend_timeout,
-        mode: mode,
-        etag: nil,
-        last_check: nil,
-        last_upgrade: nil,
-        upgrade_count: 0,
-        check_error_logged: false
-      }
-
-      Logger.info("[FlyDeploy.Poller] Started with #{interval}ms poll interval for #{app}")
-      schedule_poll(interval)
-
-      {:ok, state}
+      # BLOCKING: Apply any pending hot upgrade before supervision tree continues
+      # This ensures new code is loaded before other processes start
+      startup_apply_current(app)
     end
+
+    # Initialize current_vsn from environment and local marker
+    init_current_vsn()
+
+    state = %{
+      app: app,
+      interval: interval,
+      suspend_timeout: suspend_timeout,
+      mode: mode,
+      etag: nil,
+      last_check: nil,
+      last_upgrade: nil,
+      upgrade_count: 0,
+      check_error_logged: false
+    }
+
+    Logger.info("[FlyDeploy.Poller] Started with #{interval}ms poll interval for #{app}")
+    schedule_poll(interval)
+
+    {:ok, state}
   end
 
   defp startup_initialize_image_ref(app) do
@@ -250,7 +231,8 @@ defmodule FlyDeploy.Poller do
     state = %{
       "image_ref" => image_ref,
       "set_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "hot_upgrade" => nil
+      "hot_upgrade" => nil,
+      "blue_green_upgrade" => nil
     }
 
     write_current_state(app, state)
@@ -342,11 +324,6 @@ defmodule FlyDeploy.Poller do
   end
 
   @impl true
-  def handle_info(:poll, %{mode: :peer} = state) do
-    # No-op in peer mode — parent handles upgrades
-    {:noreply, state}
-  end
-
   def handle_info(:poll, state) do
     new_state = check_for_upgrade(state)
     schedule_poll(new_state.interval)
@@ -381,6 +358,8 @@ defmodule FlyDeploy.Poller do
     my_image_ref = System.get_env("FLY_IMAGE_REF")
     base_image_ref = Map.get(current, "image_ref")
 
+    s3_field = if state.mode == :blue_green, do: "blue_green_upgrade", else: "hot_upgrade"
+
     # Only apply upgrades if we're on the same base image generation
     if my_image_ref != base_image_ref do
       Logger.debug(
@@ -389,7 +368,7 @@ defmodule FlyDeploy.Poller do
 
       state
     else
-      case Map.get(current, "hot_upgrade") do
+      case Map.get(current, s3_field) do
         nil ->
           state
 

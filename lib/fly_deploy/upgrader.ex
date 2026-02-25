@@ -223,7 +223,7 @@ defmodule FlyDeploy.Upgrader do
 
     IO.puts("Performing safe hot upgrade...")
 
-    # perform the 4-phase upgrade
+    # perform the 4-phase upgrade (NIF modules are filtered out inside)
     result = safe_upgrade_application(app, opts)
 
     IO.puts("  Modules reloaded: #{result.modules_reloaded}")
@@ -445,8 +445,17 @@ defmodule FlyDeploy.Upgrader do
     end
 
     # Load modified modules using load_binary for embedded mode compatibility
+    # Filter out NIF modules — purging them triggers NIF re-init which can fail
+    # in blue-green peers where .so files may not be at the expected path
     IO.puts("Loading modified modules...")
-    modified_modules = :code.modified_modules()
+    all_modified = :code.modified_modules()
+    {nif_modules, modified_modules} = Enum.split_with(all_modified, &has_nif?/1)
+
+    if nif_modules != [] do
+      Logger.info(
+        "[#{inspect(__MODULE__)}] Skipping #{length(nif_modules)} NIF modules at startup: #{inspect(nif_modules)}"
+      )
+    end
 
     Enum.each(modified_modules, fn module ->
       :code.purge(module)
@@ -481,8 +490,19 @@ defmodule FlyDeploy.Upgrader do
     Logger.info("[#{inspect(__MODULE__)}] Starting safe upgrade for #{app}")
     suspend_timeout = Keyword.get(opts, :suspend_timeout, 3_000)
 
-    # detect changed modules
-    changed_modules = :code.modified_modules()
+    # detect changed modules, filtering out NIF-bearing modules
+    # Purging a NIF module triggers NIF re-initialization which tries to load the .so
+    # file from priv_dir. In blue-green peers, this path points to the extracted tarball
+    # directory where the .so may not exist. NIF code changes require a cold deploy anyway.
+    all_changed = :code.modified_modules()
+    {nif_modules, changed_modules} = Enum.split_with(all_changed, &has_nif?/1)
+
+    if nif_modules != [] do
+      Logger.info(
+        "[#{inspect(__MODULE__)}] Skipping #{length(nif_modules)} NIF modules (require cold deploy): #{inspect(nif_modules)}"
+      )
+    end
+
     Logger.info("[#{inspect(__MODULE__)}] Changed modules: #{inspect(changed_modules)}")
 
     # find all processes that need upgrading BEFORE loading new code
@@ -720,6 +740,26 @@ defmodule FlyDeploy.Upgrader do
           false
       end
     end)
+  end
+
+  # Returns true if the module has loaded NIF functions.
+  # NIF modules must NOT be purged/reloaded during hot upgrades because:
+  # 1. Purging unloads the NIF shared object
+  # 2. Reloading triggers NIF re-initialization via on_load
+  # 3. The .so file may not exist at the expected priv_dir path
+  #    (especially in blue-green peers loading code from /tmp/)
+  # 4. NIF code changes require a cold deploy anyway
+  defp has_nif?(module) do
+    try do
+      case module.module_info(:nifs) do
+        [] -> false
+        [_ | _] -> true
+      end
+    rescue
+      _ -> false
+    catch
+      _, _ -> false
+    end
   end
 
   # returns true if the tarball beam file differs from the currently loaded code

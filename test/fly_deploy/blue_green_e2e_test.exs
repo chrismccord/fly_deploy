@@ -116,13 +116,22 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
     IO.puts("✓ Counter state captured\n")
 
-    # Step 3: Blue-green upgrade to v2
-    IO.puts("Step 3: Performing blue-green upgrade to v2...")
+    # Step 3: Blue-green upgrade to v2 (with availability monitoring)
+    IO.puts("Step 3: Performing blue-green upgrade to v2 (with availability monitoring)...")
     write_health_controller("v2")
     write_counter_module("v2")
     update_static_assets("v2")
+
+    # Start blasting HTTP requests in background to monitor availability during cutover
+    blaster = Task.async(fn -> blast_requests(app_url) end)
+
     deploy_hot_blue_green()
     wait_for_deployment()
+
+    # Stop blaster and print report
+    send(blaster.pid, :stop)
+    availability_results = Task.await(blaster, 30_000)
+    print_availability_report(availability_results)
 
     # Step 4: Verify v2 is running with FRESH state
     IO.puts("Step 4: Verifying blue-green upgrade results...")
@@ -162,28 +171,66 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     IO.puts("  After upgrade - app.css content hash: #{v2_css_hash}")
     IO.puts("✓ Static assets verified\n")
 
+    # Step 4b: Increment counter to build state in the v2 peer
+    IO.puts("Step 4b: Incrementing counter in v2 peer...")
+    increment_counter(app_url, 3)
+    before_hot = get_health_check(app_url)
+    assert before_hot["counter"]["count"] == 3
+    before_hot_pid = before_hot["counter"]["pid"]
+    IO.puts("  Counter before hot upgrade: count=3, pid=#{before_hot_pid}")
+    IO.puts("✓ Counter state built in v2 peer\n")
+
+    # Step 4c: Hot upgrade inside the peer to v2-hot
+    IO.puts("Step 4c: Performing hot upgrade inside blue-green peer to v2-hot...")
+    write_health_controller("v2-hot")
+    write_counter_module("v2-hot")
+    deploy_hot()
+    wait_for_deployment()
+    IO.puts("✓ Hot upgrade deployed\n")
+
+    # Step 4d: Verify hot upgrade preserved state
+    IO.puts("Step 4d: Verifying hot upgrade inside peer...")
+    after_hot = assert_health_response(app_url, "ok-v2-hot")
+
+    assert after_hot["counter"]["count"] == 3,
+           "Counter should preserve count=3 after hot upgrade. Got: #{after_hot["counter"]["count"]}"
+
+    assert after_hot["counter"]["version"] == "v2-hot",
+           "Version should be v2-hot (code_change ran). Got: #{after_hot["counter"]["version"]}"
+
+    after_hot_pid = after_hot["counter"]["pid"]
+
+    assert after_hot_pid == before_hot_pid,
+           "Counter PID should be SAME after hot upgrade. Before: #{before_hot_pid}, After: #{after_hot_pid}"
+
+    IO.puts(
+      "  Counter after hot upgrade: count=#{after_hot["counter"]["count"]}, version=#{after_hot["counter"]["version"]}, pid=#{after_hot_pid}"
+    )
+
+    IO.puts("✓ Hot upgrade inside peer successful - state preserved, same PID\n")
+
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
     restart_all_machines()
     wait_for_deployment()
     IO.puts("✓ Machines restarted\n")
 
-    # Step 6: Verify v2 is still running after restart (startup reapply)
-    IO.puts("Step 6: Verifying startup reapply...")
-    after_restart = assert_health_response(app_url, "ok-v2")
+    # Step 6: Verify v2-hot is running after restart (both blue-green + hot reapplied)
+    IO.puts("Step 6: Verifying startup reapply (blue-green + hot)...")
+    after_restart = assert_health_response(app_url, "ok-v2-hot")
     assert after_restart["counter"]["count"] == 0, "Counter should be 0 after restart"
 
-    assert after_restart["counter"]["version"] == "v2",
-           "Version should still be v2 after restart"
+    assert after_restart["counter"]["version"] == "v2-hot",
+           "Version should be v2-hot after restart (both layers reapplied)"
 
     restart_pid = after_restart["counter"]["pid"]
-    refute restart_pid == after_pid, "Counter should have new PID after restart"
+    refute restart_pid == after_hot_pid, "Counter should have new PID after restart"
 
     IO.puts(
       "  Counter after restart: count=#{after_restart["counter"]["count"]}, version=#{after_restart["counter"]["version"]}, pid=#{restart_pid}"
     )
 
-    IO.puts("✓ Startup reapply successful - still running v2 with fresh state\n")
+    IO.puts("✓ Startup reapply successful - running v2-hot with fresh state\n")
 
     # Step 7: Unset blue-green mode and cold deploy v3
     IO.puts("Step 7: Unsetting FLY_DEPLOY_MODE and cold deploying v3...")
@@ -382,6 +429,24 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     output
   end
 
+  defp deploy_hot do
+    IO.puts("  Running: mix fly_deploy.hot")
+
+    {output, exit_code} =
+      System.cmd(
+        "mix",
+        ["fly_deploy.hot"],
+        cd: @test_app_dir,
+        into: IO.stream()
+      )
+
+    if exit_code != 0 do
+      raise "Hot deploy failed with exit code #{exit_code}"
+    end
+
+    output
+  end
+
   defp deploy_hot_blue_green do
     IO.puts("  Running: mix fly_deploy.hot --mode blue_green")
 
@@ -536,5 +601,158 @@ defmodule FlyDeploy.BlueGreenE2ETest do
       _ ->
         "unknown"
     end
+  end
+
+  # -- Availability monitoring -----------------------------------------------
+
+  defp blast_requests(app_url) do
+    health_url = "#{app_url}/api/health"
+    start_time = System.monotonic_time(:millisecond)
+    blast_loop(health_url, [], start_time)
+  end
+
+  defp blast_loop(url, results, start_time) do
+    receive do
+      :stop -> Enum.reverse(results)
+    after
+      0 ->
+        req_start = System.monotonic_time(:millisecond)
+        elapsed = req_start - start_time
+
+        result =
+          try do
+            case Req.get(url,
+                   receive_timeout: 5_000,
+                   connect_options: [timeout: 5_000],
+                   retry: false,
+                   redirect: false
+                 ) do
+              {:ok, %{status: status, body: body}} ->
+                latency = System.monotonic_time(:millisecond) - req_start
+                app_status = if is_map(body), do: body["status"], else: nil
+
+                %{
+                  elapsed_ms: elapsed,
+                  latency_ms: latency,
+                  http_status: status,
+                  app_status: app_status
+                }
+
+              {:error, reason} ->
+                latency = System.monotonic_time(:millisecond) - req_start
+
+                %{
+                  elapsed_ms: elapsed,
+                  latency_ms: latency,
+                  http_status: nil,
+                  error: format_error(reason)
+                }
+            end
+          rescue
+            e ->
+              latency = System.monotonic_time(:millisecond) - req_start
+
+              %{
+                elapsed_ms: elapsed,
+                latency_ms: latency,
+                http_status: nil,
+                error: Exception.message(e)
+              }
+          end
+
+        Process.sleep(10)
+        blast_loop(url, [result | results], start_time)
+    end
+  end
+
+  defp format_error(%{reason: reason}), do: inspect(reason)
+  defp format_error(reason), do: inspect(reason)
+
+  defp print_availability_report([]) do
+    IO.puts("\n  === Cutover Availability Report ===")
+    IO.puts("  No requests recorded")
+    IO.puts("  ===================================\n")
+  end
+
+  defp print_availability_report(results) do
+    total = length(results)
+    successes = Enum.count(results, &(&1[:http_status] == 200))
+    failures = total - successes
+    duration_s = (List.last(results).elapsed_ms / 1000) |> Float.round(1)
+    success_pct = Float.round(successes / total * 100, 2)
+
+    IO.puts("\n  === Cutover Availability Report ===")
+    IO.puts("  Duration: #{duration_s}s (includes build + upload + cutover)")
+    IO.puts("  Total requests: #{total}")
+    IO.puts("  Successful (HTTP 200): #{successes} (#{success_pct}%)")
+    IO.puts("  Failed: #{failures}")
+
+    # Latency stats (only for successful requests)
+    successful = Enum.filter(results, &(&1[:http_status] == 200))
+
+    if length(successful) > 0 do
+      latencies = Enum.map(successful, & &1.latency_ms) |> Enum.sort()
+      avg = (Enum.sum(latencies) / length(latencies)) |> Float.round(0) |> trunc()
+      p50 = Enum.at(latencies, div(length(latencies), 2))
+      p99 = Enum.at(latencies, trunc(length(latencies) * 0.99))
+      max = List.last(latencies)
+
+      IO.puts("  Latency: avg=#{avg}ms, p50=#{p50}ms, p99=#{p99}ms, max=#{max}ms")
+    end
+
+    # Status timeline — group consecutive identical statuses
+    IO.puts("")
+    IO.puts("  Status timeline:")
+    print_status_timeline(results)
+
+    # Print errors if any
+    errors = Enum.filter(results, &(&1[:http_status] != 200))
+
+    if length(errors) > 0 do
+      IO.puts("")
+      IO.puts("  Errors (#{length(errors)}):")
+
+      Enum.each(errors, fn e ->
+        t = Float.round(e.elapsed_ms / 1000, 2)
+        http = if e[:http_status], do: "HTTP #{e.http_status}", else: "ERR"
+        detail = e[:error] || e[:app_status] || ""
+        IO.puts("    #{t}s: #{http} (latency: #{e.latency_ms}ms) #{detail}")
+      end)
+    end
+
+    IO.puts("  ===================================\n")
+  end
+
+  defp print_status_timeline(results) do
+    # Group consecutive runs of the same status
+    results
+    |> Enum.chunk_while(
+      nil,
+      fn entry, acc ->
+        status = entry[:app_status] || entry[:error] || "HTTP #{entry[:http_status]}"
+
+        case acc do
+          nil ->
+            {:cont, {status, entry.elapsed_ms, entry.elapsed_ms, 1}}
+
+          {^status, start_ms, _end_ms, count} ->
+            {:cont, {status, start_ms, entry.elapsed_ms, count + 1}}
+
+          {prev_status, start_ms, end_ms, count} ->
+            {:cont, {prev_status, start_ms, end_ms, count},
+             {status, entry.elapsed_ms, entry.elapsed_ms, 1}}
+        end
+      end,
+      fn
+        nil -> {:cont, nil}
+        acc -> {:cont, acc, nil}
+      end
+    )
+    |> Enum.reject(&is_nil/1)
+    |> Enum.each(fn {status, start_ms, end_ms, count} ->
+      t1 = Float.round(start_ms / 1000, 1)
+      t2 = Float.round(end_ms / 1000, 1)
+      IO.puts("    #{t1}s - #{t2}s: #{status} (#{count} requests)")
+    end)
   end
 end

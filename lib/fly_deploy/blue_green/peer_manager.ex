@@ -2,23 +2,231 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   @moduledoc """
   Manages the lifecycle of peer BEAM nodes for blue-green deploys.
 
-  The PeerManager runs on the parent node and is responsible for:
-  - Starting the initial peer with the current code
-  - On upgrade: starting a new peer with new code, warming it up, cutting over
-  - Stopping the old peer after cutover
+  ## Architecture Overview
 
-  ## Peer Startup
+  Blue-green mode runs two BEAM layers on a single Fly machine: a **parent**
+  node that never serves traffic, and a **peer** node (a child BEAM process
+  started via OTP's `:peer` module) that runs the user's full application and
+  binds the HTTP port. On upgrade, a *new* peer boots with new code, the old
+  peer's Endpoint is stopped (freeing the port), the new peer's Gate opens
+  (binding the port), and the old peer is terminated.
 
-  Each peer is a separate BEAM process started via `:peer.start/1`.
-  The parent transfers application env, marks the peer with `__role__: :peer`,
-  and boots the user's OTP app. The Gate blocks the Endpoint until cutover.
+  ```
+  ┌─ Fly Machine (single VM instance) ──────────────────────────────────────┐
+  │                                                                         │
+  │  Parent BEAM (long-lived, never serves traffic)                         │
+  │  ├─ BlueGreen.Supervisor                                                │
+  │  │   ├─ PeerManager          ← this module                             │
+  │  │   │   • starts/stops peer BEAM processes via :peer                   │
+  │  │   │   • handles cutover (stop old Endpoint → open new Gate)          │
+  │  │   │   • on startup, checks S3 for pending blue-green reapply        │
+  │  │   │                                                                  │
+  │  │   └─ Poller (mode: :blue_green)                                      │
+  │  │       • polls S3 "blue_green_upgrade" field                          │
+  │  │       • on change → calls PeerManager.upgrade(tarball_url)           │
+  │  │                                                                      │
+  │  └─ (no Endpoint, no Repo, no app processes)                            │
+  │                                                                         │
+  │  Peer BEAM (child process, serves all traffic)                          │
+  │  ├─ User's full supervision tree                                        │
+  │  │   ├─ FlyDeploy Poller (mode: :hot)    ← polls "hot_upgrade" field   │
+  │  │   │   • applies hot code upgrades in-place inside the peer           │
+  │  │   │   • on startup, checks S3 for pending hot upgrade reapply        │
+  │  │   ├─ Repo, PubSub, Counter, ...                                     │
+  │  │   ├─ BlueGreen.Gate                   ← blocks until parent opens   │
+  │  │   └─ Endpoint                         ← binds port 4000             │
+  │  │                                                                      │
+  │  └─ Code loaded from /tmp/fly_deploy_bg_<ts>/ (not /app/)              │
+  │                                                                         │
+  └─────────────────────────────────────────────────────────────────────────┘
+  ```
 
-  ## Cutover
+  ## How Peers Are Started
 
-  1. New peer warms up (everything before Gate is running)
-  2. Old peer's Endpoint is stopped (port freed)
-  3. New peer's Gate is opened (Endpoint starts, binds port)
-  4. Old peer is stopped
+  Each peer is a separate OS process started via `:peer.start/1`. The parent:
+
+  1. Finds the bundled `erl` binary from the ERTS directory
+  2. Builds exec args: `-boot start_clean` (bypasses the release boot script),
+     `-config` (sys.config from the release or extracted tarball),
+     `-args_file` (vm.args)
+  3. Passes `-pa` flags for all code paths (ebin directories)
+  4. Calls `:peer.start(%{name: ..., exec: {erl, args}, ...})`
+  5. Boots Elixir + Logger via `:erpc.call`
+  6. Marks the peer with `Application.put_env(:fly_deploy, :__role__, :peer)`
+  7. Casts `Application.ensure_all_started(otp_app)` (non-blocking because
+     the Gate will block in its `init/1`)
+
+  Why `-boot start_clean`? Without it, `:peer` inherits the parent's release
+  boot script which auto-starts all apps before we can mark `__role__: :peer`,
+  and computes node names from FLY_IMAGE_REF causing invalid names.
+
+  Why `erpc.cast` for app start? The peer's Gate blocks in `init/1` via
+  `receive`, so `ensure_all_started` won't return until the Gate opens.
+  Using cast avoids deadlock — the parent waits for the Gate to register,
+  then sends `:open`.
+
+  ## The Gate
+
+  `FlyDeploy.BlueGreen.Gate` is a GenServer placed in the supervision tree
+  *above* the Endpoint. In peer mode, its `init/1` blocks on
+  `receive do :open -> ... end`. This prevents the Endpoint from starting
+  (and binding the port) until the parent signals cutover. In dev/test mode,
+  the Gate opens immediately.
+
+  ## Blue-Green Upgrade Flow
+
+  When the parent's Poller detects a new `"blue_green_upgrade"` in S3:
+
+  ```
+  Poller ──→ PeerManager.upgrade(tarball_url)
+               │
+               ├─ 1. Download tarball from S3
+               ├─ 2. Extract to /tmp/fly_deploy_bg_<ts>/
+               ├─ 3. Build code paths from extracted ebin dirs
+               ├─ 4. Start new peer with new code paths
+               │      └─ Peer boots supervision tree, Gate blocks
+               ├─ 5. Wait for Gate to register on new peer
+               ├─ 6. Cutover:
+               │      ├─ Stop old peer's Endpoint (frees port 4000)
+               │      └─ Open new peer's Gate (Endpoint starts, binds port)
+               └─ 7. Stop old peer entirely
+  ```
+
+  Key properties:
+  - **Zero downtime**: The old Endpoint serves traffic until the new peer is
+    fully warmed up. Port handoff is the only gap (~milliseconds).
+  - **Clean state**: The new peer starts fresh — no `code_change/3`, no state
+    migration. This is the key difference from hot upgrades.
+  - **New PID**: Every process gets a new PID (new BEAM process).
+
+  ## Hot Upgrades Inside Peers
+
+  The peer runs its own `FlyDeploy.Poller` with `mode: :hot` (started as
+  `{FlyDeploy, otp_app: :my_app}` in the user's supervision tree). This
+  Poller polls the `"hot_upgrade"` field in S3, completely independent of
+  the parent's Poller which watches `"blue_green_upgrade"`.
+
+  When a hot upgrade is detected inside the peer:
+
+  ```
+  Peer's Poller ──→ FlyDeploy.hot_upgrade(tarball_url, app)
+                      │
+                      ├─ Download tarball from S3
+                      ├─ Copy .beam files to where :code.which() says
+                      │   they're loaded (/tmp/fly_deploy_bg_<ts>/lib/...)
+                      ├─ Detect changed modules via :code.modified_modules()
+                      ├─ Phase 1: Suspend ALL processes using changed modules
+                      ├─ Phase 2: Purge + load ALL new code
+                      ├─ Phase 3: :sys.change_code on ALL processes
+                      └─ Phase 4: Resume ALL processes
+  ```
+
+  This works because the Upgrader uses `:code.which(module)` to find where
+  each module is currently loaded from, then copies new beams to that same
+  path. Whether the peer loaded code from `/app/lib/` or
+  `/tmp/fly_deploy_bg_<ts>/lib/`, the hot upgrade lands in the right place.
+
+  ## S3 State: Separate Fields
+
+  The deployment metadata in S3 (`releases/<app>-current.json`) has two
+  independent fields so blue-green and hot upgrades coexist:
+
+  ```json
+  {
+    "image_ref": "registry.fly.io/app:deployment-ABC",
+    "blue_green_upgrade": {
+      "tarball_url": "https://s3/.../app-0.2.0.tar.gz",
+      "source_image_ref": "registry.fly.io/app:deployment-DEF",
+      ...
+    },
+    "hot_upgrade": {
+      "tarball_url": "https://s3/.../app-0.2.1.tar.gz",
+      "source_image_ref": "registry.fly.io/app:deployment-GHI",
+      ...
+    }
+  }
+  ```
+
+  Rules:
+  - `mix fly_deploy.hot` (default mode) → writes `"hot_upgrade"`, preserves
+    `"blue_green_upgrade"`
+  - `mix fly_deploy.hot --mode blue_green` → writes `"blue_green_upgrade"`,
+    clears `"hot_upgrade"` (new peer = fresh start, old hot patches subsumed)
+  - `fly deploy` (cold deploy) → machines detect image_ref mismatch and
+    reset both fields to nil
+
+  ## Restart Reapply Flow
+
+  When a Fly machine restarts (crash, scaling, `fly machine restart`), both
+  layers are reapplied from S3:
+
+  ```
+  Machine restarts
+    │
+    ├─ Parent boots
+    │   └─ BlueGreen.Supervisor starts
+    │       ├─ PeerManager.init
+    │       │   ├─ resolve_startup_code(otp_app)
+    │       │   │   └─ Reads S3 "blue_green_upgrade" field
+    │       │   │       → Downloads tarball → extracts to /tmp/bg_<ts>/
+    │       │   ├─ start_peer(otp_app, new_code_paths)
+    │       │   │   └─ Peer boots with /tmp/bg_<ts>/ code (v2)
+    │       │   │       ├─ {FlyDeploy, otp_app: :app} starts Poller (mode: :hot)
+    │       │   │       │   └─ startup_apply_current reads S3 "hot_upgrade"
+    │       │   │       │       → Downloads v2-hot tarball
+    │       │   │       │       → Copies beams to /tmp/bg_<ts>/ paths
+    │       │   │       │       → Loads via :c.lm() (no suspend at startup)
+    │       │   │       │       → Peer now running v2-hot code
+    │       │   │       ├─ Counter, Repo, PubSub, ...
+    │       │   │       ├─ Gate (blocks)
+    │       │   │       └─ Endpoint (waiting behind Gate)
+    │       │   ├─ wait_for_gate → Gate registered
+    │       │   └─ Gate.open → Endpoint binds port → serving traffic
+    │       │
+    │       └─ Poller (mode: :blue_green)
+    │           └─ Polls for future blue-green upgrades
+    │
+    └─ Result: machine serves v2-hot traffic (blue-green base + hot overlay)
+  ```
+
+  ## Cutover Details
+
+  The cutover sequence is carefully ordered to minimize downtime:
+
+  1. **Stop old Endpoint** — `GenServer.stop(Endpoint)` on the old peer frees
+     port 4000. No new connections are accepted. Existing connections drain.
+  2. **Open new Gate** — Sends `:open` to the new peer's Gate process. Gate's
+     `init/1` returns, supervisor starts the Endpoint, which binds port 4000.
+
+  The gap between step 1 and step 2 is typically milliseconds (same machine,
+  no network). Fly's proxy buffers incoming requests during this window.
+
+  ## Why the Parent Never Serves Traffic
+
+  The parent node's only job is process management:
+  - Start/stop peer BEAM processes
+  - Poll S3 for blue-green upgrades
+  - Coordinate cutover
+
+  It has no Repo, no Endpoint, no business logic processes. This means:
+  - Parent crashes don't affect traffic (peer keeps running independently)
+  - Parent restarts cleanly without port conflicts
+  - Upgrade logic is isolated from application logic
+
+  ## Tarball Types
+
+  PeerManager handles two tarball formats:
+
+  - **Full release** (blue-green mode): Contains `lib/` + `releases/`
+    (sys.config, vm.args, boot files, consolidated protocols). The peer uses
+    100% new code paths — no mixing with the parent's code.
+
+  - **Beam-only** (hot mode, fallback): Contains just `.beam` files and
+    consolidated protocols. Merged with the parent's existing code paths
+    (new ebin dirs replace matching app dirs).
+
+  Full release tarballs are detected by the presence of a `releases/`
+  directory with a `sys.config` file.
   """
 
   use GenServer
@@ -62,6 +270,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # is in S3. Download it and boot the initial peer with new code directly,
     # instead of starting with old code and waiting for the Poller to re-upgrade.
     {code_paths, peer_opts} = resolve_startup_code(otp_app)
+    peer_opts = Keyword.put(peer_opts, :endpoint, state.endpoint)
     {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
 
     # Wait for the Gate to register before opening it.
@@ -97,7 +306,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
-        case start_new_peer(state.otp_app, new_paths, release_dir) do
+        case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint) do
           {:ok, peer_pid, peer_node} ->
             case wait_for_gate(peer_node) do
               :ok ->
@@ -180,6 +389,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             "[BlueGreen.PeerManager] Full release extracted: #{length(new_ebin_paths)} ebin dirs, release dir: #{release_dir}"
           )
 
+          # Ensure NIF .so files are present — they may be missing from the tarball
+          # if they were symlinks in the Docker image or excluded during build.
+          # Falls back to copying from the parent's release at /app/lib/.
+          ensure_nif_files(tmp_dir)
+
           # Copy static assets to /app so the running app can serve them
           copy_static_assets(tmp_dir, otp_app)
 
@@ -227,8 +441,51 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
+  # Ensures NIF shared object files (.so) are present in the extracted tarball.
+  #
+  # NIF files can be missing from the tarball for several reasons:
+  # - Symlinks in the Docker image that break during tar/extract round-trip
+  # - OTP apps whose priv directories weren't included in the tarball
+  # - Multi-stage Docker builds where symlink targets don't exist in the runner image
+  #
+  # For any app directory in the extracted tarball that's missing .so files present
+  # in the parent's release at /app/lib/, we copy them over. This handles:
+  # - OTP NIFs (crypto, asn1, etc.)
+  # - Dependency NIFs (explorer, rustler-based deps, etc.)
+  # - User application NIFs
+  defp ensure_nif_files(extracted_dir) do
+    parent_lib = Path.join(:code.root_dir() |> to_string(), "lib")
+    extracted_lib = Path.join(extracted_dir, "lib")
+
+    for app_dir <- Path.wildcard(Path.join(extracted_lib, "*")),
+        File.dir?(app_dir) do
+      app_basename = Path.basename(app_dir)
+      parent_app = Path.join(parent_lib, app_basename)
+
+      if File.dir?(parent_app) do
+        # Find all shared object files in the parent's priv tree
+        parent_nifs =
+          Path.wildcard(Path.join([parent_app, "priv", "**", "*.{so,so.*,dylib}"]))
+          |> Enum.filter(&File.regular?/1)
+
+        for nif_file <- parent_nifs do
+          rel = Path.relative_to(nif_file, parent_app)
+          dest = Path.join(app_dir, rel)
+
+          unless File.exists?(dest) do
+            File.mkdir_p!(Path.dirname(dest))
+            File.cp!(nif_file, dest)
+
+            Logger.info("[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}")
+          end
+        end
+      end
+    end
+  end
+
   defp copy_consolidated_protocols(extract_dir) do
-    consolidated_files = Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
+    consolidated_files =
+      Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
 
     Enum.each(consolidated_files, fn src_path ->
       [_, version, _, beam_filename] =
@@ -255,9 +512,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end)
   end
 
-  defp start_new_peer(otp_app, code_paths, release_dir) do
+  defp start_new_peer(otp_app, code_paths, release_dir, endpoint) do
     try do
       opts = if release_dir, do: [release_dir: release_dir], else: []
+      opts = if endpoint, do: Keyword.put(opts, :endpoint, endpoint), else: opts
       {peer_pid, peer_node} = start_peer(otp_app, code_paths, opts)
       {:ok, peer_pid, peer_node}
     rescue
@@ -314,6 +572,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # Mark as peer so Gate and start_link detect it
     :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer])
 
+    # Inject SO_REUSEPORT so both old and new peers can bind the same port
+    # simultaneously during cutover, eliminating the brief gap where neither
+    # peer is listening. SOL_SOCKET=1, SO_REUSEPORT=15 on Linux.
+    endpoint = Keyword.get(opts, :endpoint)
+
+    if endpoint do
+      inject_reuseport(node, otp_app, endpoint)
+    end
+
     # Start the user's OTP app — this boots the supervision tree.
     # Gate will block before the Endpoint starts.
     # Use cast so we don't block here (Gate blocks in init).
@@ -325,9 +592,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             :ok
 
           {:error, {failed_app, reason}} ->
-            Logger.warning(
-              "[BlueGreen.Peer] Failed to start #{failed_app}: #{inspect(reason)}"
-            )
+            Logger.warning("[BlueGreen.Peer] Failed to start #{failed_app}: #{inspect(reason)}")
         end
       rescue
         e ->
@@ -345,9 +610,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     root = :code.root_dir() |> to_string()
 
     args = [
-      ~c"-boot", boot,
+      ~c"-boot",
+      boot,
       # The boot file references $RELEASE_LIB for application paths — expand it
-      ~c"-boot_var", ~c"RELEASE_LIB", String.to_charlist(Path.join(root, "lib"))
+      ~c"-boot_var",
+      ~c"RELEASE_LIB",
+      String.to_charlist(Path.join(root, "lib"))
       # Note: -proto_dist inet6_tcp is inherited from ERL_AFLAGS (set by env.sh)
     ]
 
@@ -457,6 +725,29 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
+  # -- Reuseport injection ---------------------------------------------------
+
+  defp inject_reuseport(node, otp_app, endpoint) do
+    :erpc.call(node, fn ->
+      config = Application.get_env(otp_app, endpoint, [])
+      http_config = Keyword.get(config, :http, [])
+      ti_opts = Keyword.get(http_config, :thousand_island_options, [])
+      transport_opts = Keyword.get(ti_opts, :transport_options, [])
+
+      transport_opts = Keyword.merge(transport_opts, reuseport: true, reuseaddr: true)
+      ti_opts = Keyword.put(ti_opts, :transport_options, transport_opts)
+      http_config = Keyword.put(http_config, :thousand_island_options, ti_opts)
+      config = Keyword.put(config, :http, http_config)
+
+      Application.put_env(otp_app, endpoint, config)
+    end)
+  rescue
+    e ->
+      Logger.warning(
+        "[BlueGreen.PeerManager] Failed to inject reuseport: #{Exception.message(e)}"
+      )
+  end
+
   # -- Cutover ---------------------------------------------------------------
 
   defp cutover(state, new_node) do
@@ -465,7 +756,20 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     Logger.info("[BlueGreen.PeerManager] Cutover: #{old_node} -> #{new_node}")
 
-    # 1. Stop old peer's Endpoint (frees port 4000)
+    # With SO_REUSEPORT, both old and new peers can bind the same port
+    # simultaneously. We open the new Gate FIRST so the new Endpoint starts
+    # accepting before we stop the old one — zero gap.
+
+    # 1. Open new peer's Gate — Endpoint starts and binds port via reuseport
+    Logger.info("[BlueGreen.PeerManager] Opening gate on #{new_node}")
+    FlyDeploy.BlueGreen.Gate.open(new_node)
+
+    # 2. Wait for new Endpoint to be ready (port bound)
+    if endpoint do
+      wait_for_endpoint(new_node, endpoint)
+    end
+
+    # 3. Stop old peer's Endpoint — only new peer remains on port
     if endpoint do
       Logger.info("[BlueGreen.PeerManager] Stopping endpoint #{endpoint} on #{old_node}")
 
@@ -476,11 +780,34 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       end
     end
 
-    # 2. Open new peer's Gate (Endpoint starts, binds port)
-    Logger.info("[BlueGreen.PeerManager] Opening gate on #{new_node}")
-    FlyDeploy.BlueGreen.Gate.open(new_node)
-
     :ok
+  end
+
+  defp wait_for_endpoint(node, endpoint, timeout \\ 10_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_for_endpoint(node, endpoint, deadline)
+  end
+
+  defp do_wait_for_endpoint(node, endpoint, deadline) do
+    case :erpc.call(node, Process, :whereis, [endpoint]) do
+      pid when is_pid(pid) ->
+        # Endpoint process exists — give it a moment to finish binding the listener
+        Process.sleep(100)
+        Logger.info("[BlueGreen.PeerManager] Endpoint #{endpoint} ready on #{node}")
+        :ok
+
+      nil ->
+        if System.monotonic_time(:millisecond) > deadline do
+          Logger.warning(
+            "[BlueGreen.PeerManager] Endpoint not found on #{node} after timeout, proceeding"
+          )
+
+          :ok
+        else
+          Process.sleep(50)
+          do_wait_for_endpoint(node, endpoint, deadline)
+        end
+    end
   end
 
   # -- Startup reapply -------------------------------------------------------
@@ -499,11 +826,18 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
           case download_and_extract(tarball_url, otp_app) do
             {:ok, paths, release_dir} ->
               opts = if release_dir, do: [release_dir: release_dir], else: []
-              Logger.info("[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths")
+
+              Logger.info(
+                "[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths"
+              )
+
               {paths, opts}
 
             {:error, reason} ->
-              Logger.warning("[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code")
+              Logger.warning(
+                "[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code"
+              )
+
               {current_code_paths(), []}
           end
 
@@ -539,7 +873,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
           base_image_ref = Map.get(body, "image_ref")
 
           if base_image_ref == my_image_ref do
-            case Map.get(body, "hot_upgrade") do
+            case Map.get(body, "blue_green_upgrade") do
               %{"tarball_url" => tarball_url} when is_binary(tarball_url) ->
                 {:ok, tarball_url}
 
@@ -557,7 +891,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   rescue
     e ->
-      Logger.warning("[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}")
+      Logger.warning(
+        "[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}"
+      )
+
       :none
   end
 

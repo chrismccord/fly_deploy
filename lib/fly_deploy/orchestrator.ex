@@ -306,14 +306,24 @@ defmodule FlyDeploy.Orchestrator do
     marker_entry = {~c"fly_deploy_marker.json", String.to_charlist(marker_path)}
     files_to_tar = [marker_entry | files_to_tar]
 
-    :ok = :erl_tar.create(String.to_charlist(tarball_path), files_to_tar, [:compressed])
+    # Use :dereference so NIF .so symlinks (e.g. crypto.so -> erts-*/lib/...)
+    # are stored as real files. Without this, extracting to /tmp/ creates broken
+    # symlinks because the relative path targets don't exist there.
+    {:ok, tar} = :erl_tar.open(String.to_charlist(tarball_path), [:write, :compressed])
+
+    Enum.each(files_to_tar, fn {name, source} ->
+      :ok = :erl_tar.add(tar, source, name, [:dereference])
+    end)
+
+    :ok = :erl_tar.close(tar)
 
     tarball_size = File.stat!(tarball_path).size
     size_mb = Float.round(tarball_size / 1_048_576, 1)
 
     IO.puts(ansi([:green], "    ✓ Created #{info.summary} (#{size_mb} MB)"))
 
-    {tarball_path, %{modules: info.module_count, static_files: info.static_count, size_bytes: tarball_size}}
+    {tarball_path,
+     %{modules: info.module_count, static_files: info.static_count, size_bytes: tarball_size}}
   end
 
   # Blue-green: package the full release — the peer boots from scratch and needs everything
@@ -336,7 +346,8 @@ defmodule FlyDeploy.Orchestrator do
     info = %{
       module_count: beam_count,
       static_count: static_count,
-      summary: "#{length(lib_files)} lib files + #{length(releases_files)} release files (full release for blue-green)"
+      summary:
+        "#{length(lib_files)} lib files + #{length(releases_files)} release files (full release for blue-green)"
     }
 
     {all_files, info}
@@ -359,7 +370,8 @@ defmodule FlyDeploy.Orchestrator do
     info = %{
       module_count: length(beam_files),
       static_count: static_count,
-      summary: "#{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols#{static_info}"
+      summary:
+        "#{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols#{static_info}"
     }
 
     {all_files, info}
@@ -368,7 +380,16 @@ defmodule FlyDeploy.Orchestrator do
   defp upload_to_tigris(tarball_path, app, version, bucket) do
     IO.puts(ansi([:yellow], "--> Uploading to S3"))
 
-    object_key = "releases/#{app}-#{version}.tar.gz"
+    mode = System.get_env("DEPLOY_MODE", "hot")
+    # Use separate S3 keys for blue-green vs hot tarballs so they don't overwrite each other.
+    # On restart, PeerManager downloads the blue-green tarball (full release) and the peer's
+    # Poller downloads the hot tarball (beam-only). Both must coexist in S3.
+    object_key =
+      if mode == "blue_green" do
+        "releases/#{app}-#{version}-blue_green.tar.gz"
+      else
+        "releases/#{app}-#{version}.tar.gz"
+      end
 
     content = File.read!(tarball_path)
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
@@ -427,28 +448,35 @@ defmodule FlyDeploy.Orchestrator do
           nil
       end
 
-    # merge hot upgrade info while preserving image_ref if it exists
-    updated =
-      case existing do
-        nil ->
-          # no existing state - machines will initialize image_ref on boot
-          %{
-            "hot_upgrade" => %{
-              "version" => version,
-              "source_image_ref" => source_image_ref,
-              "tarball_url" => tarball_url,
-              "deployed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
-            }
-          }
+    mode = System.get_env("DEPLOY_MODE", "hot")
 
-        current ->
-          # preserve existing image_ref, update hot_upgrade section
-          Map.put(current, "hot_upgrade", %{
-            "version" => version,
-            "source_image_ref" => source_image_ref,
-            "tarball_url" => tarball_url,
-            "deployed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
-          })
+    upgrade_data = %{
+      "version" => version,
+      "source_image_ref" => source_image_ref,
+      "tarball_url" => tarball_url,
+      "deployed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    # Write to mode-specific field:
+    # - hot: write hot_upgrade, preserve blue_green_upgrade
+    # - blue_green: write blue_green_upgrade, clear hot_upgrade (new peer = fresh start)
+    updated =
+      case {mode, existing} do
+        {_, nil} ->
+          # no existing state - machines will initialize image_ref on boot
+          if mode == "blue_green" do
+            %{"blue_green_upgrade" => upgrade_data}
+          else
+            %{"hot_upgrade" => upgrade_data}
+          end
+
+        {"blue_green", current} ->
+          current
+          |> Map.put("blue_green_upgrade", upgrade_data)
+          |> Map.put("hot_upgrade", nil)
+
+        {_hot, current} ->
+          Map.put(current, "hot_upgrade", upgrade_data)
       end
 
     # write updated state
