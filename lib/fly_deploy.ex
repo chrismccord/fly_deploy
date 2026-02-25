@@ -219,6 +219,29 @@ defmodule FlyDeploy do
   defdelegate current_vsn(), to: FlyDeploy.Poller
 
   @doc """
+  Returns a list of blue-green peer nodes visible to this node.
+
+  Peer nodes are named with a `_peer_` segment (e.g., `my_app_peer_123@fd00::1`).
+  This filters `Node.list/0` to only return peer nodes, excluding parent nodes,
+  remsh sessions, and other non-peer nodes.
+
+  Useful for clustering logic where you want to ignore the hidden parent nodes
+  and only interact with the peers that actually serve traffic.
+
+  ## Example
+
+      FlyDeploy.peer_nodes()
+      #=> [:"my_app_peer_818@fdaa:28:186d:a7b:577:86b0:d474:2"]
+
+  """
+  def peer_nodes do
+    Node.list()
+    |> Enum.filter(fn node ->
+      node |> Atom.to_string() |> String.contains?("_peer_")
+    end)
+  end
+
+  @doc """
   Deprecated: Use `{FlyDeploy, otp_app: :my_app}` in your supervision tree instead.
 
   This function is kept for backwards compatibility but simply starts the poller.
