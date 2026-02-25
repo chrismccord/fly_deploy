@@ -96,4 +96,5 @@ USER nobody
 # above and adding an entrypoint. See https://github.com/krallin/tini for details
 # ENTRYPOINT ["/tini", "--"]
 
+# CMD ["sleep", "inf"]
 CMD ["/app/bin/server"]

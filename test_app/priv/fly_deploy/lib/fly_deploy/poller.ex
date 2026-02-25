@@ -108,29 +108,92 @@ defmodule FlyDeploy.Poller do
     app = Keyword.fetch!(opts, :otp_app)
     interval = Keyword.get(opts, :poll_interval, @default_poll_interval)
     suspend_timeout = Keyword.get(opts, :suspend_timeout, 10_000)
+    mode = Keyword.get(opts, :mode, :hot)
 
-    # BLOCKING: Apply any pending hot upgrade before supervision tree continues
-    # This ensures new code is loaded before other processes start
-    startup_apply_current(app)
+    # If we're in a peer node, the parent's Poller (in BlueGreen.Supervisor)
+    # handles upgrades. This Poller becomes a no-op to avoid interfering.
+    if Application.get_env(:fly_deploy, :__role__) == :peer do
+      Logger.info("[FlyDeploy.Poller] Running in peer node — parent handles upgrades")
 
-    # Initialize current_vsn from environment and local marker
-    init_current_vsn()
+      {:ok,
+       %{
+         app: app,
+         interval: interval,
+         suspend_timeout: suspend_timeout,
+         mode: :peer,
+         etag: nil,
+         last_check: nil,
+         last_upgrade: nil,
+         upgrade_count: 0,
+         check_error_logged: false
+       }}
+    else
+      if mode == :blue_green do
+        # In blue-green mode, just initialize image_ref tracking in S3
+        # so the Poller can detect new upgrades. Don't apply hot upgrades —
+        # the PeerManager handles code loading via peer nodes.
+        startup_initialize_image_ref(app)
+      else
+        # BLOCKING: Apply any pending hot upgrade before supervision tree continues
+        # This ensures new code is loaded before other processes start
+        startup_apply_current(app)
+      end
 
-    state = %{
-      app: app,
-      interval: interval,
-      suspend_timeout: suspend_timeout,
-      etag: nil,
-      last_check: nil,
-      last_upgrade: nil,
-      upgrade_count: 0,
-      check_error_logged: false
-    }
+      # Initialize current_vsn from environment and local marker
+      init_current_vsn()
 
-    Logger.info("[FlyDeploy.Poller] Started with #{interval}ms poll interval for #{app}")
-    schedule_poll(interval)
+      state = %{
+        app: app,
+        interval: interval,
+        suspend_timeout: suspend_timeout,
+        mode: mode,
+        etag: nil,
+        last_check: nil,
+        last_upgrade: nil,
+        upgrade_count: 0,
+        check_error_logged: false
+      }
 
-    {:ok, state}
+      Logger.info("[FlyDeploy.Poller] Started with #{interval}ms poll interval for #{app}")
+      schedule_poll(interval)
+
+      {:ok, state}
+    end
+  end
+
+  defp startup_initialize_image_ref(app) do
+    my_image_ref = System.get_env("FLY_IMAGE_REF")
+
+    if is_nil(my_image_ref) do
+      Logger.info("[FlyDeploy] No FLY_IMAGE_REF found (dev environment?), skipping init")
+    else
+      Logger.info("[FlyDeploy] Machine starting with image: #{my_image_ref}")
+
+      case fetch_current_state(app) do
+        {:ok, current} ->
+          current_image_ref = Map.get(current, "image_ref")
+
+          if current_image_ref != my_image_ref do
+            Logger.info(
+              "[FlyDeploy] New cold deploy detected (was: #{current_image_ref}, now: #{my_image_ref}), resetting state"
+            )
+
+            initialize_current_state(app, my_image_ref)
+          end
+
+        {:error, :not_found} ->
+          Logger.info("[FlyDeploy] First boot, initializing current state")
+          initialize_current_state(app, my_image_ref)
+
+        {:error, reason} ->
+          Logger.warning("[FlyDeploy] Failed to fetch current state: #{inspect(reason)}")
+      end
+    end
+  rescue
+    e ->
+      Logger.error(
+        "[FlyDeploy] Unexpected error during startup init: #{Exception.format(:error, e, __STACKTRACE__)}"
+      )
   end
 
   defp startup_apply_current(app) do
@@ -279,6 +342,11 @@ defmodule FlyDeploy.Poller do
   end
 
   @impl true
+  def handle_info(:poll, %{mode: :peer} = state) do
+    # No-op in peer mode — parent handles upgrades
+    {:noreply, state}
+  end
+
   def handle_info(:poll, state) do
     new_state = check_for_upgrade(state)
     schedule_poll(new_state.interval)
@@ -351,13 +419,25 @@ defmodule FlyDeploy.Poller do
     tarball_url = upgrade["tarball_url"]
     version = upgrade["version"]
 
-    Logger.info("[FlyDeploy.Poller] Applying hot upgrade v#{version}...")
+    Logger.info("[FlyDeploy.Poller] Applying #{state.mode} upgrade v#{version}...")
 
     # Write pending status immediately so orchestrator knows we're working on it
     write_pending_status(state.app, upgrade_id)
 
     try do
-      case FlyDeploy.hot_upgrade(tarball_url, state.app, suspend_timeout: state.suspend_timeout) do
+      result =
+        case state.mode do
+          :blue_green ->
+            case FlyDeploy.BlueGreen.PeerManager.upgrade(tarball_url) do
+              :ok -> {:ok, %{}}
+              {:error, reason} -> {:error, reason}
+            end
+
+          _hot ->
+            FlyDeploy.hot_upgrade(tarball_url, state.app, suspend_timeout: state.suspend_timeout)
+        end
+
+      case result do
         {:ok, result} ->
           duration = System.monotonic_time(:millisecond) - start_time
           Logger.info("[FlyDeploy.Poller] Hot upgrade v#{version} applied successfully")

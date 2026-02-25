@@ -1,12 +1,24 @@
 defmodule TestApp.Application do
-  # See https://hexdocs.pm/elixir/Application.html
-  # for more information on OTP Applications
   @moduledoc false
 
   use Application
 
   @impl true
-  def start(_type, _args) do
+  def start(type, args) do
+    case System.get_env("FLY_DEPLOY_MODE") do
+      "blue_green" ->
+        FlyDeploy.BlueGreen.start_link(
+          otp_app: :test_app,
+          start: {__MODULE__, :start_app, [type, args]},
+          endpoint: TestAppWeb.Endpoint
+        )
+
+      _ ->
+        start_app(type, args)
+    end
+  end
+
+  def start_app(_type, _args) do
     children = [
       # FlyDeploy MUST be first - it blocks to apply hot upgrades before other processes start
       {FlyDeploy, otp_app: :test_app},
@@ -14,18 +26,16 @@ defmodule TestApp.Application do
       {Phoenix.PubSub, name: TestApp.PubSub},
       # Start the counter GenServer for hot upgrade testing
       TestApp.Counter,
+      # Gate opens immediately in non-blue-green mode, blocks in peer mode
+      {FlyDeploy.BlueGreen.Gate, []},
       # Start to serve requests, typically the last entry
       TestAppWeb.Endpoint
     ]
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
     opts = [strategy: :one_for_one, name: TestApp.Supervisor]
     Supervisor.start_link(children, opts)
   end
 
-  # Tell Phoenix to update the endpoint configuration
-  # whenever the application is updated.
   @impl true
   def config_change(changed, _new, removed) do
     TestAppWeb.Endpoint.config_change(changed, removed)
