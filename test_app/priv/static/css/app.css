@@ -8,6 +8,7 @@ body {
   content: "v3";
 }
 
+/* Version-specific style to ensure content differs */
 .v3-only {
   display: block;
 }

@@ -322,7 +322,8 @@ defmodule FlyDeploy.Orchestrator do
 
     IO.puts(ansi([:green], "    ✓ Created #{info.summary} (#{size_mb} MB)"))
 
-    {tarball_path, %{modules: info.module_count, static_files: info.static_count, size_bytes: tarball_size}}
+    {tarball_path,
+     %{modules: info.module_count, static_files: info.static_count, size_bytes: tarball_size}}
   end
 
   # Blue-green: package the full release — the peer boots from scratch and needs everything
@@ -345,7 +346,8 @@ defmodule FlyDeploy.Orchestrator do
     info = %{
       module_count: beam_count,
       static_count: static_count,
-      summary: "#{length(lib_files)} lib files + #{length(releases_files)} release files (full release for blue-green)"
+      summary:
+        "#{length(lib_files)} lib files + #{length(releases_files)} release files (full release for blue-green)"
     }
 
     {all_files, info}
@@ -368,7 +370,8 @@ defmodule FlyDeploy.Orchestrator do
     info = %{
       module_count: length(beam_files),
       static_count: static_count,
-      summary: "#{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols#{static_info}"
+      summary:
+        "#{length(beam_files)} modules + #{length(consolidated_files)} consolidated protocols#{static_info}"
     }
 
     {all_files, info}

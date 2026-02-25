@@ -416,6 +416,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
           all_paths = base_paths ++ new_ebin_paths
 
+          ensure_nif_files(tmp_dir)
           copy_consolidated_protocols(tmp_dir)
           copy_static_assets(tmp_dir, otp_app)
 
@@ -476,7 +477,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             File.mkdir_p!(Path.dirname(dest))
             File.cp!(nif_file, dest)
 
-            Logger.info("[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}")
+            Logger.info(
+              "[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}"
+            )
           end
         end
       end
@@ -484,8 +487,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   end
 
   defp copy_consolidated_protocols(extract_dir) do
-    consolidated_files =
-      Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
+    consolidated_files = Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
 
     Enum.each(consolidated_files, fn src_path ->
       [_, version, _, beam_filename] =
@@ -592,7 +594,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             :ok
 
           {:error, {failed_app, reason}} ->
-            Logger.warning("[BlueGreen.Peer] Failed to start #{failed_app}: #{inspect(reason)}")
+            Logger.warning(
+              "[BlueGreen.Peer] Failed to start #{failed_app}: #{inspect(reason)}"
+            )
         end
       rescue
         e ->
@@ -610,12 +614,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     root = :code.root_dir() |> to_string()
 
     args = [
-      ~c"-boot",
-      boot,
+      ~c"-boot", boot,
       # The boot file references $RELEASE_LIB for application paths — expand it
-      ~c"-boot_var",
-      ~c"RELEASE_LIB",
-      String.to_charlist(Path.join(root, "lib"))
+      ~c"-boot_var", ~c"RELEASE_LIB", String.to_charlist(Path.join(root, "lib"))
       # Note: -proto_dist inet6_tcp is inherited from ERL_AFLAGS (set by env.sh)
     ]
 
@@ -826,18 +827,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
           case download_and_extract(tarball_url, otp_app) do
             {:ok, paths, release_dir} ->
               opts = if release_dir, do: [release_dir: release_dir], else: []
-
-              Logger.info(
-                "[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths"
-              )
-
+              Logger.info("[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths")
               {paths, opts}
 
             {:error, reason} ->
-              Logger.warning(
-                "[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code"
-              )
-
+              Logger.warning("[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code")
               {current_code_paths(), []}
           end
 
@@ -891,10 +885,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   rescue
     e ->
-      Logger.warning(
-        "[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}"
-      )
-
+      Logger.warning("[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}")
       :none
   end
 
