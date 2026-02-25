@@ -289,7 +289,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint) do
           {:ok, peer_pid, peer_node} ->
             # New peer is fully started with Endpoint bound via reuseport.
+            # Ensure old and new peers can see each other for process handoff
+            # (e.g., Horde handoff, volume access transfer in terminate/2).
+            ensure_peers_connected(state.active_node, peer_node)
+
             # Gracefully shut down the old peer (drains connections, cleans up).
+            # Distribution stays alive until kernel shuts down last, so the
+            # old peer remains meshed throughout its entire shutdown sequence.
             graceful_stop_peer(state.active_peer, state.active_node)
 
             Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
@@ -498,8 +504,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   defp start_peer(otp_app, code_paths, opts) do
     cookie = Node.get_cookie()
-    suffix = System.get_env("FLY_MACHINE_ID") || "#{System.unique_integer([:positive])}"
-    name = :"#{otp_app}_peer_#{suffix}"
+    machine_id = System.get_env("FLY_MACHINE_ID")
+    gen = System.unique_integer([:positive])
+
+    name =
+      if machine_id do
+        :"#{otp_app}_peer_#{machine_id}_#{gen}"
+      else
+        :"#{otp_app}_peer_#{gen}"
+      end
 
     code_path_args =
       Enum.flat_map(code_paths, fn p -> [~c"-pa", String.to_charlist(p)] end)
@@ -678,6 +691,14 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     case Path.wildcard(Path.join([root, "releases", "*", "sys.config"])) do
       [sys_config | _] -> Path.dirname(sys_config)
       [] -> nil
+    end
+  end
+
+  defp ensure_peers_connected(old_node, new_node) do
+    try do
+      :erpc.call(new_node, Node, :connect, [old_node], 5_000)
+    catch
+      :exit, _ -> :ok
     end
   end
 
