@@ -230,6 +230,18 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     GenServer.call(__MODULE__, {:upgrade, tarball_url}, :infinity)
   end
 
+  @doc """
+  Returns the active peer's node name.
+
+  Useful for remsh-ing into the peer from the parent:
+
+      /app/bin/myapp rpc 'IO.puts(FlyDeploy.BlueGreen.PeerManager.peer_node())'
+      RELEASE_NODE=<output> /app/bin/myapp remote
+  """
+  def peer_node do
+    GenServer.call(__MODULE__, :peer_node)
+  end
+
   @impl true
   def init(opts) do
     otp_app = Keyword.fetch!(opts, :otp_app)
@@ -253,6 +265,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   end
 
   @impl true
+  def handle_call(:peer_node, _from, state) do
+    {:reply, state.active_node, state}
+  end
+
   def handle_call({:upgrade, tarball_url}, _from, state) do
     case do_upgrade(tarball_url, state) do
       {:ok, new_state} ->
@@ -432,9 +448,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             File.mkdir_p!(Path.dirname(dest))
             File.cp!(nif_file, dest)
 
-            Logger.info(
-              "[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}"
-            )
+            Logger.info("[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}")
           end
         end
       end
@@ -442,7 +456,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   end
 
   defp copy_consolidated_protocols(extract_dir) do
-    consolidated_files = Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
+    consolidated_files =
+      Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
 
     Enum.each(consolidated_files, fn src_path ->
       [_, version, _, beam_filename] =
@@ -526,6 +541,18 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:elixir])
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:logger])
 
+    # Load release config manually.
+    # With -boot start_clean, the kernel can't process config providers from
+    # sys.config because they reference Elixir modules (Config.Provider.Elixir)
+    # that aren't loaded yet. This means compile-time config (from config.exs)
+    # and runtime config (from runtime.exs) are both missing. Load them now
+    # that Elixir is available.
+    vsn_dir = release_dir || find_current_release_dir()
+
+    if vsn_dir do
+      load_release_config(node, vsn_dir)
+    end
+
     # Mark as peer so FlyDeploy.BlueGreen.start_link detects it
     :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer])
 
@@ -551,9 +578,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       end
     rescue
       e ->
-        Logger.error(
-          "[BlueGreen.PeerManager] Peer #{node} boot failed: #{Exception.message(e)}"
-        )
+        Logger.error("[BlueGreen.PeerManager] Peer #{node} boot failed: #{Exception.message(e)}")
 
         stop_peer(pid, node)
         reraise e, __STACKTRACE__
@@ -567,9 +592,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     root = :code.root_dir() |> to_string()
 
     args = [
-      ~c"-boot", boot,
+      ~c"-boot",
+      boot,
       # The boot file references $RELEASE_LIB for application paths — expand it
-      ~c"-boot_var", ~c"RELEASE_LIB", String.to_charlist(Path.join(root, "lib"))
+      ~c"-boot_var",
+      ~c"RELEASE_LIB",
+      String.to_charlist(Path.join(root, "lib"))
       # Note: -proto_dist inet6_tcp is inherited from ERL_AFLAGS (set by env.sh)
     ]
 
@@ -671,6 +699,73 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     :ok
   end
 
+  # -- Release config loading ------------------------------------------------
+
+  # Loads compile-time and runtime config into the peer's application env.
+  #
+  # With -boot start_clean, the kernel can't evaluate config providers from
+  # sys.config because they reference Elixir modules that aren't loaded during
+  # kernel boot. This means Application.get_env returns nil for all app config.
+  #
+  # We fix this by:
+  # 1. Reading sys.config (Erlang term file) and applying static config values
+  # 2. Evaluating runtime.exs (if present) and applying runtime config values
+  defp load_release_config(node, vsn_dir) do
+    :erpc.call(node, fn ->
+      # Step 1: Load compile-time config from sys.config
+      sys_config_path = Path.join(vsn_dir, "sys.config")
+
+      if File.exists?(sys_config_path) do
+        case :file.consult(String.to_charlist(sys_config_path)) do
+          {:ok, [configs]} when is_list(configs) ->
+            for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
+              for {key, val} <- kvs do
+                Application.put_env(app, key, val, persistent: true)
+              end
+            end
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Loaded compile-time config from #{sys_config_path}"
+            )
+
+          other ->
+            Logger.warning(
+              "[BlueGreen.PeerManager] Could not parse sys.config: #{inspect(other)}"
+            )
+        end
+      end
+
+      # Step 2: Load runtime config from runtime.exs
+      # Runtime values are MERGED on top of compile-time values (Keyword.merge),
+      # not replaced. This preserves compile-time keys that runtime.exs doesn't
+      # re-set (e.g., adapter: Bandit.PhoenixAdapter in the endpoint config).
+      runtime_path = Path.join(vsn_dir, "runtime.exs")
+
+      if File.exists?(runtime_path) do
+        configs = Config.Reader.read!(runtime_path, env: :prod)
+
+        for {app, kvs} <- configs do
+          for {key, val} <- kvs do
+            case {Application.fetch_env(app, key), val} do
+              {{:ok, existing}, val} when is_list(existing) and is_list(val) ->
+                Application.put_env(app, key, Keyword.merge(existing, val), persistent: true)
+
+              _ ->
+                Application.put_env(app, key, val, persistent: true)
+            end
+          end
+        end
+
+        Logger.info("[BlueGreen.PeerManager] Loaded runtime config from #{runtime_path}")
+      end
+    end)
+  rescue
+    e ->
+      Logger.warning(
+        "[BlueGreen.PeerManager] Failed to load release config: #{Exception.message(e)}"
+      )
+  end
+
   # -- Startup reapply -------------------------------------------------------
 
   defp resolve_startup_code(otp_app) do
@@ -687,11 +782,18 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
           case download_and_extract(tarball_url, otp_app) do
             {:ok, paths, release_dir} ->
               opts = if release_dir, do: [release_dir: release_dir], else: []
-              Logger.info("[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths")
+
+              Logger.info(
+                "[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths"
+              )
+
               {paths, opts}
 
             {:error, reason} ->
-              Logger.warning("[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code")
+              Logger.warning(
+                "[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code"
+              )
+
               {current_code_paths(), []}
           end
 
@@ -745,7 +847,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   rescue
     e ->
-      Logger.warning("[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}")
+      Logger.warning(
+        "[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}"
+      )
+
       :none
   end
 

@@ -541,6 +541,18 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:elixir])
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:logger])
 
+    # Load release config manually.
+    # With -boot start_clean, the kernel can't process config providers from
+    # sys.config because they reference Elixir modules (Config.Provider.Elixir)
+    # that aren't loaded yet. This means compile-time config (from config.exs)
+    # and runtime config (from runtime.exs) are both missing. Load them now
+    # that Elixir is available.
+    vsn_dir = release_dir || find_current_release_dir()
+
+    if vsn_dir do
+      load_release_config(node, vsn_dir)
+    end
+
     # Mark as peer so FlyDeploy.BlueGreen.start_link detects it
     :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer])
 
@@ -685,6 +697,73 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
 
     :ok
+  end
+
+  # -- Release config loading ------------------------------------------------
+
+  # Loads compile-time and runtime config into the peer's application env.
+  #
+  # With -boot start_clean, the kernel can't evaluate config providers from
+  # sys.config because they reference Elixir modules that aren't loaded during
+  # kernel boot. This means Application.get_env returns nil for all app config.
+  #
+  # We fix this by:
+  # 1. Reading sys.config (Erlang term file) and applying static config values
+  # 2. Evaluating runtime.exs (if present) and applying runtime config values
+  defp load_release_config(node, vsn_dir) do
+    :erpc.call(node, fn ->
+      # Step 1: Load compile-time config from sys.config
+      sys_config_path = Path.join(vsn_dir, "sys.config")
+
+      if File.exists?(sys_config_path) do
+        case :file.consult(String.to_charlist(sys_config_path)) do
+          {:ok, [configs]} when is_list(configs) ->
+            for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
+              for {key, val} <- kvs do
+                Application.put_env(app, key, val, persistent: true)
+              end
+            end
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Loaded compile-time config from #{sys_config_path}"
+            )
+
+          other ->
+            Logger.warning(
+              "[BlueGreen.PeerManager] Could not parse sys.config: #{inspect(other)}"
+            )
+        end
+      end
+
+      # Step 2: Load runtime config from runtime.exs
+      # Runtime values are MERGED on top of compile-time values (Keyword.merge),
+      # not replaced. This preserves compile-time keys that runtime.exs doesn't
+      # re-set (e.g., adapter: Bandit.PhoenixAdapter in the endpoint config).
+      runtime_path = Path.join(vsn_dir, "runtime.exs")
+
+      if File.exists?(runtime_path) do
+        configs = Config.Reader.read!(runtime_path, env: :prod)
+
+        for {app, kvs} <- configs do
+          for {key, val} <- kvs do
+            case {Application.fetch_env(app, key), val} do
+              {{:ok, existing}, val} when is_list(existing) and is_list(val) ->
+                Application.put_env(app, key, Keyword.merge(existing, val), persistent: true)
+
+              _ ->
+                Application.put_env(app, key, val, persistent: true)
+            end
+          end
+        end
+
+        Logger.info("[BlueGreen.PeerManager] Loaded runtime config from #{runtime_path}")
+      end
+    end)
+  rescue
+    e ->
+      Logger.warning(
+        "[BlueGreen.PeerManager] Failed to load release config: #{Exception.message(e)}"
+      )
   end
 
   # -- Startup reapply -------------------------------------------------------

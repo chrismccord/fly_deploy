@@ -97,7 +97,7 @@ defmodule FlyDeploy.BlueGreen do
       # so Node.start will use IPv6 distribution automatically.
       ip = System.get_env("FLY_PRIVATE_IP", "127.0.0.1")
       node_name = :"fly_deploy_parent_#{System.pid()}@#{ip}"
-      {:ok, _} = Node.start(node_name, :longnames)
+      {:ok, _} = :net_kernel.start(node_name, %{name_domain: :longnames, hidden: true})
       :ok
     end
   end

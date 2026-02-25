@@ -3,5 +3,30 @@ set -eu
 
 cd -P -- "$(dirname -- "$0")"
 
+# Discover the peer node name via RPC to the parent
 PEER_NODE=$(./test_app rpc 'IO.puts(FlyDeploy.BlueGreen.PeerManager.peer_node())')
-RELEASE_NODE="$PEER_NODE" exec ./test_app remote
+
+# We can't use `RELEASE_NODE=<peer> ./test_app remote` because env.sh
+# unconditionally sets RELEASE_NODE to the parent's node name on Fly.
+# Instead, invoke the release's embedded elixir binary directly.
+
+RELEASE_ROOT="$(cd .. && pwd -P)"
+REL_VSN="$(cut -d' ' -f2 "$RELEASE_ROOT/releases/start_erl.data")"
+REL_VSN_DIR="$RELEASE_ROOT/releases/$REL_VSN"
+RELEASE_COOKIE="$(cat "$RELEASE_ROOT/releases/COOKIE")"
+
+# On Fly, use IPv6 distribution
+if [ -n "${FLY_PRIVATE_IP:-}" ]; then
+  IP="$FLY_PRIVATE_IP"
+  export ERL_AFLAGS="-proto_dist inet6_tcp"
+else
+  IP="127.0.0.1"
+fi
+
+exec "$REL_VSN_DIR/elixir" \
+  --hidden \
+  --cookie "$RELEASE_COOKIE" \
+  --name "remsh_$$@$IP" \
+  --remsh "$PEER_NODE" \
+  --boot "$REL_VSN_DIR/start_clean" \
+  --boot-var RELEASE_LIB "$RELEASE_ROOT/lib"

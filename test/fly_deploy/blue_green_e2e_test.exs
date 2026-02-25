@@ -57,6 +57,9 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
     IO.puts("  ✓ Source files copied to priv/fly_deploy")
 
+    # Clean up test artifacts from previous runs
+    File.rm(Path.join(@test_app_dir, "priv/deploy_test.txt"))
+
     IO.puts("Installing test_app dependencies...")
     {_output, 0} = System.cmd("mix", ["deps.get"], cd: @test_app_dir, into: IO.stream())
     IO.puts("  ✓ Dependencies installed")
@@ -86,15 +89,24 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     # Step 1: Set FLY_DEPLOY_MODE=blue_green and deploy v1
     IO.puts("Step 1: Setting FLY_DEPLOY_MODE=blue_green and deploying v1...")
 
-    {_, 0} =
+    {output, exit_code} =
       System.cmd(
         "fly",
         ["secrets", "set", "FLY_DEPLOY_MODE=blue_green", "-a", @app_name, "--stage"],
-        cd: @test_app_dir
+        cd: @test_app_dir,
+        stderr_to_stdout: true
       )
+
+    if exit_code != 0 do
+      raise "fly secrets set failed (exit #{exit_code}): #{output}"
+    end
 
     write_health_controller("v1")
     write_counter_module("v1")
+    write_compile_config("v1")
+    write_runtime_config("v1")
+    write_mix_deps("v1")
+    write_priv_file("v1")
     update_static_assets("v1")
     deploy_cold()
     wait_for_deployment()
@@ -108,6 +120,11 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     assert before_upgrade["status"] == "ok-v1"
     assert before_upgrade["counter"]["count"] == 5
     assert before_upgrade["counter"]["version"] == "v1"
+    assert before_upgrade["compile_config"] == "v1", "Compile-time config should be v1"
+    assert before_upgrade["runtime_config"] == "v1", "Runtime config should be v1"
+    assert before_upgrade["new_dep_loaded"] == false, "nimble_csv should NOT be loaded in v1"
+    assert is_nil(before_upgrade["nif_result"]), "bcrypt NIF should NOT be available in v1"
+    assert before_upgrade["priv_file"] == "priv-v1", "Priv file should be v1"
     before_pid = before_upgrade["counter"]["pid"]
 
     IO.puts(
@@ -120,6 +137,10 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     IO.puts("Step 3: Performing blue-green upgrade to v2 (with availability monitoring)...")
     write_health_controller("v2")
     write_counter_module("v2")
+    write_compile_config("v2")
+    write_runtime_config("v2")
+    write_mix_deps("v2")
+    write_priv_file("v2")
     update_static_assets("v2")
 
     # Start blasting HTTP requests in background to monitor availability during cutover
@@ -145,6 +166,24 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
     assert after_upgrade["counter"]["version"] == "v2",
            "Version should be v2 (fresh init with v2 code)"
+
+    # Config changes should be picked up by the new peer
+    assert after_upgrade["compile_config"] == "v2",
+           "Compile-time config should be v2 (new sys.config from blue-green tarball)"
+
+    assert after_upgrade["runtime_config"] == "v2",
+           "Runtime config should be v2 (new runtime.exs evaluated at peer boot)"
+
+    # New dep should be available in the peer
+    assert after_upgrade["new_dep_loaded"] == true,
+           "nimble_csv should be loaded (blue-green ships all deps)"
+
+    assert after_upgrade["priv_file"] == "priv-v2",
+           "Priv file should be v2 (blue-green ships full lib/ including priv/)"
+
+    assert is_binary(after_upgrade["nif_result"]) and
+             String.starts_with?(after_upgrade["nif_result"], "$2"),
+           "bcrypt NIF should produce a valid hash (proves new NIF .so was packaged). Got: #{inspect(after_upgrade["nif_result"])}"
 
     # PID should be DIFFERENT (new BEAM process)
     after_pid = after_upgrade["counter"]["pid"]
@@ -223,6 +262,23 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     assert after_restart["counter"]["version"] == "v2-hot",
            "Version should be v2-hot after restart (both layers reapplied)"
 
+    # Config and deps should survive restart (blue-green tarball reapplied)
+    assert after_restart["compile_config"] == "v2",
+           "Compile-time config should be v2 after restart (from blue-green tarball)"
+
+    assert after_restart["runtime_config"] == "v2",
+           "Runtime config should be v2 after restart (from blue-green tarball)"
+
+    assert after_restart["new_dep_loaded"] == true,
+           "nimble_csv should be loaded after restart (blue-green tarball has all deps)"
+
+    assert after_restart["priv_file"] == "priv-v2",
+           "Priv file should be v2 after restart (from blue-green tarball)"
+
+    assert is_binary(after_restart["nif_result"]) and
+             String.starts_with?(after_restart["nif_result"], "$2"),
+           "bcrypt NIF should work after restart (NIF .so reapplied from tarball). Got: #{inspect(after_restart["nif_result"])}"
+
     restart_pid = after_restart["counter"]["pid"]
     refute restart_pid == after_hot_pid, "Counter should have new PID after restart"
 
@@ -244,6 +300,10 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
     write_health_controller("v3")
     write_counter_module("v3")
+    write_compile_config("v3")
+    write_runtime_config("v3")
+    write_mix_deps("v3")
+    write_priv_file("v3")
     update_static_assets("v3")
     deploy_cold()
     wait_for_deployment()
@@ -280,10 +340,33 @@ defmodule FlyDeploy.BlueGreenE2ETest do
         counter_info = TestApp.Counter.get_info()
         fly_deploy_vsn = FlyDeploy.current_vsn()
 
+        priv_content =
+          case File.read(Application.app_dir(:test_app, "priv/deploy_test.txt")) do
+            {:ok, data} -> String.trim(data)
+            {:error, _} -> nil
+          end
+
+        nif_result =
+          if Code.ensure_loaded?(Bcrypt) do
+            try do
+              hash = Bcrypt.hash_pwd_salt("nif_test")
+              if is_binary(hash) and String.starts_with?(hash, "$2"), do: hash, else: "bad_hash"
+            rescue
+              e -> "error: \#{Exception.message(e)}"
+            end
+          else
+            nil
+          end
+
         json(conn, %{
           status: "ok-#{version}",
           components_defined: Code.ensure_loaded?(FlyDeploy.Components),
           fly_deploy_vsn: fly_deploy_vsn,
+          compile_config: Application.get_env(:test_app, :compile_version),
+          runtime_config: Application.get_env(:test_app, :runtime_version),
+          new_dep_loaded: Code.ensure_loaded?(NimbleCSV),
+          nif_result: nif_result,
+          priv_file: priv_content,
           counter: %{
             count: counter_info.count,
             version: counter_info.version,
@@ -397,6 +480,164 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
     File.write!(counter_path, content)
     IO.puts("  Updated Counter module to version #{version}")
+  end
+
+  # -- Config writers --------------------------------------------------------
+
+  defp write_compile_config(version) do
+    config_path = Path.join(@test_app_dir, "config/config.exs")
+
+    content = """
+    import Config
+
+    config :test_app,
+      generators: [timestamp_type: :utc_datetime],
+      compile_version: #{inspect(version)}
+
+    config :test_app, TestAppWeb.Endpoint,
+      url: [host: "localhost"],
+      adapter: Bandit.PhoenixAdapter,
+      render_errors: [
+        formats: [json: TestAppWeb.ErrorJSON],
+        layout: false
+      ],
+      pubsub_server: TestApp.PubSub,
+      live_view: [signing_salt: "8DruCBzp"]
+
+    config :logger, :default_formatter,
+      format: "$time $metadata[$level] $message\\n",
+      metadata: [:request_id]
+
+    config :phoenix, :json_library, Jason
+
+    import_config "\#{config_env()}.exs"
+    """
+
+    File.write!(config_path, content)
+    IO.puts("  Updated compile config to #{version}")
+  end
+
+  defp write_runtime_config(version) do
+    runtime_path = Path.join(@test_app_dir, "config/runtime.exs")
+
+    content = """
+    import Config
+
+    if System.get_env("PHX_SERVER") do
+      config :test_app, TestAppWeb.Endpoint, server: true
+    end
+
+    if config_env() == :prod do
+      secret_key_base =
+        System.get_env("SECRET_KEY_BASE") ||
+          raise "environment variable SECRET_KEY_BASE is missing."
+
+      host = System.get_env("PHX_HOST") || "example.com"
+      port = String.to_integer(System.get_env("PORT") || "4000")
+
+      config :test_app, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
+
+      # Runtime config version — evaluated fresh at each boot
+      config :test_app, :runtime_version, #{inspect(version)}
+
+      config :test_app, TestAppWeb.Endpoint,
+        url: [host: host, port: 443, scheme: "https"],
+        http: [
+          ip: {0, 0, 0, 0, 0, 0, 0, 0},
+          port: port
+        ],
+        secret_key_base: secret_key_base
+    end
+    """
+
+    File.write!(runtime_path, content)
+    IO.puts("  Updated runtime config to #{version}")
+  end
+
+  # -- Mix deps writer -------------------------------------------------------
+
+  defp write_mix_deps(version) do
+    mix_path = Path.join(@test_app_dir, "mix.exs")
+
+    # Add nimble_csv (pure Elixir) and bcrypt_elixir (C NIF) for v2+
+    # to test that new deps AND new NIFs are shipped in blue-green tarballs
+    extra_deps =
+      if version != "v1" do
+        ~s|      {:nimble_csv, "~> 1.2"},\n      {:bcrypt_elixir, "~> 3.2"},\n|
+      else
+        ""
+      end
+
+    content = """
+    defmodule TestApp.MixProject do
+      use Mix.Project
+
+      def project do
+        [
+          app: :test_app,
+          version: "0.1.0",
+          elixir: "~> 1.15",
+          elixirc_paths: elixirc_paths(Mix.env()),
+          start_permanent: Mix.env() == :prod,
+          aliases: aliases(),
+          deps: deps(),
+          listeners: [Phoenix.CodeReloader]
+        ]
+      end
+
+      def application do
+        [
+          mod: {TestApp.Application, []},
+          extra_applications: [:logger, :runtime_tools]
+        ]
+      end
+
+      def cli do
+        [
+          preferred_envs: [precommit: :test]
+        ]
+      end
+
+      defp elixirc_paths(:test), do: ["lib", "test/support"]
+      defp elixirc_paths(_), do: ["lib"]
+
+      defp deps do
+        [
+          {:phoenix, "~> 1.8.1"},
+          {:phoenix_live_view, "~> 1.1.18"},
+          {:telemetry_metrics, "~> 1.0"},
+          {:telemetry_poller, "~> 1.0"},
+          {:jason, "~> 1.2"},
+          {:dns_cluster, "~> 0.2.0"},
+          {:bandit, "~> 1.5"},
+          {:req, "~> 0.5"},
+    #{extra_deps}      {:fly_deploy, path: "priv/fly_deploy"}
+        ]
+      end
+
+      defp aliases do
+        [
+          setup: ["deps.get"],
+          precommit: ["compile --warning-as-errors", "deps.unlock --unused", "format", "test"]
+        ]
+      end
+    end
+    """
+
+    File.write!(mix_path, content)
+
+    # Update mix.lock so Docker build can resolve deps
+    {_, 0} = System.cmd("mix", ["deps.get"], cd: @test_app_dir, stderr_to_stdout: true)
+    IO.puts("  Updated mix deps for #{version}")
+  end
+
+  # -- Priv file writer ------------------------------------------------------
+
+  defp write_priv_file(version) do
+    priv_dir = Path.join(@test_app_dir, "priv")
+    File.mkdir_p!(priv_dir)
+    File.write!(Path.join(priv_dir, "deploy_test.txt"), "priv-#{version}")
+    IO.puts("  Updated priv file to #{version}")
   end
 
   # -- Deploy helpers --------------------------------------------------------
