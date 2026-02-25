@@ -499,7 +499,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   defp start_peer(otp_app, code_paths, opts) do
     cookie = Node.get_cookie()
-    name = :"#{otp_app}_peer_#{System.unique_integer([:positive])}"
+    suffix = System.get_env("FLY_MACHINE_ID") || "#{System.unique_integer([:positive])}"
+    name = :"#{otp_app}_peer_#{suffix}"
 
     code_path_args =
       Enum.flat_map(code_paths, fn p -> [~c"-pa", String.to_charlist(p)] end)
