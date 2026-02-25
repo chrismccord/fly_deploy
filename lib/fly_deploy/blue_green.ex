@@ -24,8 +24,6 @@ defmodule FlyDeploy.BlueGreen do
           children = [
             MyApp.Repo,
             {Phoenix.PubSub, name: MyApp.PubSub},
-            # Gate blocks here until cutover signal
-            {FlyDeploy.BlueGreen.Gate, []},
             MyAppWeb.Endpoint
           ]
 
@@ -35,10 +33,10 @@ defmodule FlyDeploy.BlueGreen do
 
   ## How it works
 
-  - **Dev/test**: Calls your `start_app` directly. Gate opens immediately. Zero overhead.
+  - **Dev/test**: Calls your `start_app` directly. Zero overhead.
   - **Fly (parent)**: Starts the BlueGreen supervisor (PeerManager + Poller), which boots
     your app in a peer BEAM process. Returns `{:ok, supervisor_pid}`.
-  - **Fly (peer)**: Calls your `start_app` directly. Gate blocks until cutover.
+  - **Fly (peer)**: Calls your `start_app` directly. Endpoint binds via SO_REUSEPORT.
 
   ## Options
 

@@ -26,8 +26,6 @@ defmodule TestApp.Application do
       {Phoenix.PubSub, name: TestApp.PubSub},
       # Start the counter GenServer for hot upgrade testing
       TestApp.Counter,
-      # Gate opens immediately in non-blue-green mode, blocks in peer mode
-      {FlyDeploy.BlueGreen.Gate, []},
       # Start to serve requests, typically the last entry
       TestAppWeb.Endpoint
     ]

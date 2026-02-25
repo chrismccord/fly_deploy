@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+cd -P -- "$(dirname -- "$0")"
+
+PEER_NODE=$(./test_app rpc 'IO.puts(FlyDeploy.BlueGreen.PeerManager.peer_node())')
+RELEASE_NODE="$PEER_NODE" exec ./test_app remote

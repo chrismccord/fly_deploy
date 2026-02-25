@@ -7,9 +7,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   Blue-green mode runs two BEAM layers on a single Fly machine: a **parent**
   node that never serves traffic, and a **peer** node (a child BEAM process
   started via OTP's `:peer` module) that runs the user's full application and
-  binds the HTTP port. On upgrade, a *new* peer boots with new code, the old
-  peer's Endpoint is stopped (freeing the port), the new peer's Gate opens
-  (binding the port), and the old peer is terminated.
+  binds the HTTP port. On upgrade, a *new* peer boots with new code (its
+  Endpoint binds via SO_REUSEPORT alongside the old), the old peer's Endpoint
+  is stopped, and the old peer is terminated.
 
   ```
   ┌─ Fly Machine (single VM instance) ──────────────────────────────────────┐
@@ -18,7 +18,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   │  ├─ BlueGreen.Supervisor                                                │
   │  │   ├─ PeerManager          ← this module                             │
   │  │   │   • starts/stops peer BEAM processes via :peer                   │
-  │  │   │   • handles cutover (stop old Endpoint → open new Gate)          │
+  │  │   │   • handles cutover (stop old Endpoint)                          │
   │  │   │   • on startup, checks S3 for pending blue-green reapply        │
   │  │   │                                                                  │
   │  │   └─ Poller (mode: :blue_green)                                      │
@@ -33,8 +33,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   │  │   │   • applies hot code upgrades in-place inside the peer           │
   │  │   │   • on startup, checks S3 for pending hot upgrade reapply        │
   │  │   ├─ Repo, PubSub, Counter, ...                                     │
-  │  │   ├─ BlueGreen.Gate                   ← blocks until parent opens   │
-  │  │   └─ Endpoint                         ← binds port 4000             │
+  │  │   └─ Endpoint                         ← binds port via reuseport    │
   │  │                                                                      │
   │  └─ Code loaded from /tmp/fly_deploy_bg_<ts>/ (not /app/)              │
   │                                                                         │
@@ -53,25 +52,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   4. Calls `:peer.start(%{name: ..., exec: {erl, args}, ...})`
   5. Boots Elixir + Logger via `:erpc.call`
   6. Marks the peer with `Application.put_env(:fly_deploy, :__role__, :peer)`
-  7. Casts `Application.ensure_all_started(otp_app)` (non-blocking because
-     the Gate will block in its `init/1`)
+  7. Injects SO_REUSEPORT config so the Endpoint can bind alongside an existing peer
+  8. Calls `ensure_all_started(otp_app)` (blocking — returns when fully started)
 
   Why `-boot start_clean`? Without it, `:peer` inherits the parent's release
   boot script which auto-starts all apps before we can mark `__role__: :peer`,
   and computes node names from FLY_IMAGE_REF causing invalid names.
-
-  Why `erpc.cast` for app start? The peer's Gate blocks in `init/1` via
-  `receive`, so `ensure_all_started` won't return until the Gate opens.
-  Using cast avoids deadlock — the parent waits for the Gate to register,
-  then sends `:open`.
-
-  ## The Gate
-
-  `FlyDeploy.BlueGreen.Gate` is a GenServer placed in the supervision tree
-  *above* the Endpoint. In peer mode, its `init/1` blocks on
-  `receive do :open -> ... end`. This prevents the Endpoint from starting
-  (and binding the port) until the parent signals cutover. In dev/test mode,
-  the Gate opens immediately.
 
   ## Blue-Green Upgrade Flow
 
@@ -84,17 +70,14 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
                ├─ 2. Extract to /tmp/fly_deploy_bg_<ts>/
                ├─ 3. Build code paths from extracted ebin dirs
                ├─ 4. Start new peer with new code paths
-               │      └─ Peer boots supervision tree, Gate blocks
-               ├─ 5. Wait for Gate to register on new peer
-               ├─ 6. Cutover:
-               │      ├─ Stop old peer's Endpoint (frees port 4000)
-               │      └─ Open new peer's Gate (Endpoint starts, binds port)
-               └─ 7. Stop old peer entirely
+               │      └─ Peer fully boots (Endpoint binds via reuseport)
+               ├─ 5. Stop old peer's Endpoint
+               └─ 6. Stop old peer entirely
   ```
 
   Key properties:
-  - **Zero downtime**: The old Endpoint serves traffic until the new peer is
-    fully warmed up. Port handoff is the only gap (~milliseconds).
+  - **Zero downtime**: Both old and new Endpoints serve simultaneously via
+    SO_REUSEPORT during the brief overlap, then old Endpoint stops.
   - **Clean state**: The new peer starts fresh — no `code_change/3`, no state
     migration. This is the key difference from hot upgrades.
   - **New PID**: Every process gets a new PID (new BEAM process).
@@ -178,10 +161,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     │       │   │       │       → Loads via :c.lm() (no suspend at startup)
     │       │   │       │       → Peer now running v2-hot code
     │       │   │       ├─ Counter, Repo, PubSub, ...
-    │       │   │       ├─ Gate (blocks)
-    │       │   │       └─ Endpoint (waiting behind Gate)
-    │       │   ├─ wait_for_gate → Gate registered
-    │       │   └─ Gate.open → Endpoint binds port → serving traffic
+    │       │   │       └─ Endpoint (binds port via reuseport)
     │       │
     │       └─ Poller (mode: :blue_green)
     │           └─ Polls for future blue-green upgrades
@@ -191,15 +171,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   ## Cutover Details
 
-  The cutover sequence is carefully ordered to minimize downtime:
-
-  1. **Stop old Endpoint** — `GenServer.stop(Endpoint)` on the old peer frees
-     port 4000. No new connections are accepted. Existing connections drain.
-  2. **Open new Gate** — Sends `:open` to the new peer's Gate process. Gate's
-     `init/1` returns, supervisor starts the Endpoint, which binds port 4000.
-
-  The gap between step 1 and step 2 is typically milliseconds (same machine,
-  no network). Fly's proxy buffers incoming requests during this window.
+  With SO_REUSEPORT, both old and new Endpoints bind the same port
+  simultaneously. The new peer's Endpoint starts during `start_peer`
+  (blocking `erpc.call`). Once it's up, we just stop the old Endpoint.
+  There is zero gap — both peers serve traffic during the overlap.
 
   ## Why the Parent Never Serves Traffic
 
@@ -273,19 +248,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     peer_opts = Keyword.put(peer_opts, :endpoint, state.endpoint)
     {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
 
-    # Wait for the Gate to register before opening it.
-    # start_peer uses erpc.cast (non-blocking), so the peer's supervision tree
-    # is still booting. If we send :open before Gate exists, the message is lost.
-    case wait_for_gate(peer_node) do
-      :ok ->
-        FlyDeploy.BlueGreen.Gate.open(peer_node)
-        Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node}")
-        {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
-
-      {:error, reason} ->
-        Logger.error("[BlueGreen.PeerManager] Initial peer gate timeout: #{inspect(reason)}")
-        {:stop, {:gate_timeout, reason}}
-    end
+    Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node}")
+    {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
   end
 
   @impl true
@@ -308,22 +272,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       {:ok, new_paths, release_dir} ->
         case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint) do
           {:ok, peer_pid, peer_node} ->
-            case wait_for_gate(peer_node) do
-              :ok ->
-                :ok = cutover(state, peer_node)
+            # Peer is fully started with Endpoint bound via reuseport.
+            # Just stop the old peer.
+            :ok = cutover(state, peer_node)
+            stop_peer(state.active_peer, state.active_node)
 
-                # Stop old peer
-                stop_peer(state.active_peer, state.active_node)
-
-                Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
-                {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
-
-              {:error, reason} ->
-                Logger.error("[BlueGreen.PeerManager] Gate timeout: #{inspect(reason)}")
-                diagnose_peer(peer_node)
-                stop_peer(peer_pid, peer_node)
-                {:error, reason}
-            end
+            Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
+            {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
 
           {:error, reason} ->
             Logger.error("[BlueGreen.PeerManager] Peer start failed: #{inspect(reason)}")
@@ -416,6 +371,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
           all_paths = base_paths ++ new_ebin_paths
 
+          ensure_nif_files(tmp_dir)
           copy_consolidated_protocols(tmp_dir)
           copy_static_assets(tmp_dir, otp_app)
 
@@ -476,7 +432,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             File.mkdir_p!(Path.dirname(dest))
             File.cp!(nif_file, dest)
 
-            Logger.info("[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}")
+            Logger.info(
+              "[BlueGreen.PeerManager] Copied missing NIF: #{app_basename}/#{rel}"
+            )
           end
         end
       end
@@ -484,8 +442,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   end
 
   defp copy_consolidated_protocols(extract_dir) do
-    consolidated_files =
-      Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
+    consolidated_files = Path.wildcard(Path.join([extract_dir, "releases", "*", "consolidated", "*.beam"]))
 
     Enum.each(consolidated_files, fn src_path ->
       [_, version, _, beam_filename] =
@@ -569,38 +526,38 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:elixir])
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:logger])
 
-    # Mark as peer so Gate and start_link detect it
+    # Mark as peer so FlyDeploy.BlueGreen.start_link detects it
     :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer])
 
     # Inject SO_REUSEPORT so both old and new peers can bind the same port
     # simultaneously during cutover, eliminating the brief gap where neither
-    # peer is listening. SOL_SOCKET=1, SO_REUSEPORT=15 on Linux.
+    # peer is listening.
     endpoint = Keyword.get(opts, :endpoint)
 
     if endpoint do
       inject_reuseport(node, otp_app, endpoint)
     end
 
-    # Start the user's OTP app — this boots the supervision tree.
-    # Gate will block before the Endpoint starts.
-    # Use cast so we don't block here (Gate blocks in init).
-    # Wrap in error-catching code so failures aren't silently lost.
-    :erpc.cast(node, fn ->
-      try do
-        case :application.ensure_all_started(otp_app) do
-          {:ok, _started} ->
-            :ok
+    # Start the user's OTP app — blocks until fully started (including Endpoint).
+    # With reuseport, the new Endpoint can bind the port even while an old peer
+    # is still serving. No Gate needed.
+    try do
+      case :erpc.call(node, :application, :ensure_all_started, [otp_app], 120_000) do
+        {:ok, _started} ->
+          Logger.info("[BlueGreen.PeerManager] Peer #{node} fully started")
 
-          {:error, {failed_app, reason}} ->
-            Logger.warning("[BlueGreen.Peer] Failed to start #{failed_app}: #{inspect(reason)}")
-        end
-      rescue
-        e ->
-          Logger.warning(
-            "[BlueGreen.Peer] App start crashed: #{Exception.format(:error, e, __STACKTRACE__)}"
-          )
+        {:error, {failed_app, reason}} ->
+          raise "Failed to start #{failed_app}: #{inspect(reason)}"
       end
-    end)
+    rescue
+      e ->
+        Logger.error(
+          "[BlueGreen.PeerManager] Peer #{node} boot failed: #{Exception.message(e)}"
+        )
+
+        stop_peer(pid, node)
+        reraise e, __STACKTRACE__
+    end
 
     {pid, node}
   end
@@ -610,12 +567,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     root = :code.root_dir() |> to_string()
 
     args = [
-      ~c"-boot",
-      boot,
+      ~c"-boot", boot,
       # The boot file references $RELEASE_LIB for application paths — expand it
-      ~c"-boot_var",
-      ~c"RELEASE_LIB",
-      String.to_charlist(Path.join(root, "lib"))
+      ~c"-boot_var", ~c"RELEASE_LIB", String.to_charlist(Path.join(root, "lib"))
       # Note: -proto_dist inet6_tcp is inherited from ERL_AFLAGS (set by env.sh)
     ]
 
@@ -672,59 +626,6 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
-  # -- Gate management -------------------------------------------------------
-
-  defp wait_for_gate(node, timeout \\ 30_000) do
-    Logger.info("[BlueGreen.PeerManager] Waiting for Gate to register on #{node}...")
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait_for_gate(node, deadline)
-  end
-
-  defp do_wait_for_gate(node, deadline) do
-    case :erpc.call(node, Process, :whereis, [FlyDeploy.BlueGreen.Gate]) do
-      pid when is_pid(pid) ->
-        Logger.info("[BlueGreen.PeerManager] Gate registered on #{node}")
-        :ok
-
-      nil ->
-        if System.monotonic_time(:millisecond) > deadline do
-          {:error, :gate_timeout}
-        else
-          Process.sleep(100)
-          do_wait_for_gate(node, deadline)
-        end
-    end
-  end
-
-  # -- Diagnostics -----------------------------------------------------------
-
-  defp diagnose_peer(node) do
-    Logger.warning("[BlueGreen.PeerManager] Diagnosing peer #{node}...")
-
-    try do
-      started =
-        :erpc.call(node, :application, :which_applications, [], 5_000)
-        |> Enum.map(fn {app, _desc, _vsn} -> app end)
-
-      Logger.warning("[BlueGreen.PeerManager] Started apps: #{inspect(started)}")
-
-      loaded =
-        :erpc.call(node, :application, :loaded_applications, [], 5_000)
-        |> Enum.map(fn {app, _desc, _vsn} -> app end)
-
-      not_started = loaded -- started
-      Logger.warning("[BlueGreen.PeerManager] Loaded but NOT started: #{inspect(not_started)}")
-
-      registered = :erpc.call(node, Process, :registered, [], 5_000)
-      Logger.warning("[BlueGreen.PeerManager] Registered processes: #{inspect(registered)}")
-    catch
-      kind, reason ->
-        Logger.warning(
-          "[BlueGreen.PeerManager] Diagnostics failed: #{inspect(kind)}: #{inspect(reason)}"
-        )
-    end
-  end
-
   # -- Reuseport injection ---------------------------------------------------
 
   defp inject_reuseport(node, otp_app, endpoint) do
@@ -750,26 +651,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   # -- Cutover ---------------------------------------------------------------
 
-  defp cutover(state, new_node) do
+  defp cutover(state, _new_node) do
     old_node = state.active_node
     endpoint = state.endpoint
 
-    Logger.info("[BlueGreen.PeerManager] Cutover: #{old_node} -> #{new_node}")
-
-    # With SO_REUSEPORT, both old and new peers can bind the same port
-    # simultaneously. We open the new Gate FIRST so the new Endpoint starts
-    # accepting before we stop the old one — zero gap.
-
-    # 1. Open new peer's Gate — Endpoint starts and binds port via reuseport
-    Logger.info("[BlueGreen.PeerManager] Opening gate on #{new_node}")
-    FlyDeploy.BlueGreen.Gate.open(new_node)
-
-    # 2. Wait for new Endpoint to be ready (port bound)
-    if endpoint do
-      wait_for_endpoint(new_node, endpoint)
-    end
-
-    # 3. Stop old peer's Endpoint — only new peer remains on port
+    # The new peer's Endpoint is already running and bound via reuseport
+    # (started during the blocking erpc.call in start_peer).
+    # Just stop the old Endpoint so only the new peer remains on the port.
     if endpoint do
       Logger.info("[BlueGreen.PeerManager] Stopping endpoint #{endpoint} on #{old_node}")
 
@@ -781,33 +669,6 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
 
     :ok
-  end
-
-  defp wait_for_endpoint(node, endpoint, timeout \\ 10_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait_for_endpoint(node, endpoint, deadline)
-  end
-
-  defp do_wait_for_endpoint(node, endpoint, deadline) do
-    case :erpc.call(node, Process, :whereis, [endpoint]) do
-      pid when is_pid(pid) ->
-        # Endpoint process exists — give it a moment to finish binding the listener
-        Process.sleep(100)
-        Logger.info("[BlueGreen.PeerManager] Endpoint #{endpoint} ready on #{node}")
-        :ok
-
-      nil ->
-        if System.monotonic_time(:millisecond) > deadline do
-          Logger.warning(
-            "[BlueGreen.PeerManager] Endpoint not found on #{node} after timeout, proceeding"
-          )
-
-          :ok
-        else
-          Process.sleep(50)
-          do_wait_for_endpoint(node, endpoint, deadline)
-        end
-    end
   end
 
   # -- Startup reapply -------------------------------------------------------
@@ -826,18 +687,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
           case download_and_extract(tarball_url, otp_app) do
             {:ok, paths, release_dir} ->
               opts = if release_dir, do: [release_dir: release_dir], else: []
-
-              Logger.info(
-                "[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths"
-              )
-
+              Logger.info("[BlueGreen.PeerManager] Startup reapply: using #{length(paths)} code paths")
               {paths, opts}
 
             {:error, reason} ->
-              Logger.warning(
-                "[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code"
-              )
-
+              Logger.warning("[BlueGreen.PeerManager] Startup reapply failed (#{inspect(reason)}), using current code")
               {current_code_paths(), []}
           end
 
@@ -891,10 +745,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   rescue
     e ->
-      Logger.warning(
-        "[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}"
-      )
-
+      Logger.warning("[BlueGreen.PeerManager] Error checking for pending upgrade: #{Exception.message(e)}")
       :none
   end
 
