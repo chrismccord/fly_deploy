@@ -288,10 +288,19 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       {:ok, new_paths, release_dir} ->
         case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint) do
           {:ok, peer_pid, peer_node} ->
-            # Peer is fully started with Endpoint bound via reuseport.
-            # Just stop the old peer.
-            :ok = cutover(state, peer_node)
-            stop_peer(state.active_peer, state.active_node)
+            # New peer is fully started with Endpoint bound via reuseport.
+            # Ensure old and new peers can see each other for process handoff
+            # (e.g., Horde handoff, volume access transfer in terminate/2).
+            ensure_peers_connected(state.active_node, peer_node)
+
+            # Gracefully shut down the old peer:
+            # 1. Stop Endpoint first → closes listening socket (SO_REUSEPORT
+            #    removes it, all new connections go to new peer) → Bandit
+            #    drains in-flight requests
+            # 2. :init.stop() → full OTP shutdown (terminate/2, cleanup, etc.)
+            #    Distribution stays alive until kernel shuts down last, so the
+            #    old peer remains meshed throughout its entire shutdown sequence.
+            graceful_stop_peer(state.active_peer, state.active_node, state.endpoint)
 
             Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
@@ -499,7 +508,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   defp start_peer(otp_app, code_paths, opts) do
     cookie = Node.get_cookie()
-    name = :"#{otp_app}_peer_#{System.unique_integer([:positive])}"
+    machine_id = System.get_env("FLY_MACHINE_ID")
+    gen = System.unique_integer([:positive])
+
+    name =
+      if machine_id do
+        :"#{otp_app}_peer_#{machine_id}_#{gen}"
+      else
+        :"#{otp_app}_peer_#{gen}"
+      end
 
     code_path_args =
       Enum.flat_map(code_paths, fn p -> [~c"-pa", String.to_charlist(p)] end)
@@ -617,11 +634,48 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     sys_config = Path.join(vsn_dir, "sys.config")
 
     if File.exists?(sys_config) do
-      # -config expects path without .config extension
-      sys = String.replace_trailing(sys_config, ".config", "") |> String.to_charlist()
+      # Strip config_providers from sys.config before passing to the peer.
+      # With -config, the kernel processes config_providers (OTP 21+), which
+      # calls Config.Provider.Elixir and triggers validate_compile_env. This
+      # produces errors when runtime.exs overrides compile-time values (e.g.,
+      # api_host differs between prod and staging). We handle config loading
+      # manually in load_release_config instead.
+      peer_config = strip_config_providers(sys_config)
+      sys = String.replace_trailing(peer_config, ".config", "") |> String.to_charlist()
       args ++ [~c"-config", sys]
     else
       args
+    end
+  end
+
+  # Writes a copy of sys.config with config_providers entries removed.
+  # This gives the kernel all static app config at boot (logger, kernel, etc.)
+  # without triggering Elixir's config provider machinery.
+  defp strip_config_providers(sys_config_path) do
+    case :file.consult(String.to_charlist(sys_config_path)) do
+      {:ok, [configs]} when is_list(configs) ->
+        stripped =
+          Enum.map(configs, fn
+            {app, kvs} when is_atom(app) and is_list(kvs) ->
+              {app, Keyword.delete(kvs, :config_providers)}
+
+            other ->
+              other
+          end)
+
+        tmp_path =
+          Path.join(
+            System.tmp_dir!(),
+            "fly_deploy_peer_#{:erlang.unique_integer([:positive])}.config"
+          )
+
+        content = :io_lib.format(~c"~p.~n", [stripped]) |> IO.iodata_to_binary()
+        File.write!(tmp_path, content)
+        tmp_path
+
+      _ ->
+        # Can't parse, use original
+        sys_config_path
     end
   end
 
@@ -641,6 +695,87 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     case Path.wildcard(Path.join([root, "releases", "*", "sys.config"])) do
       [sys_config | _] -> Path.dirname(sys_config)
       [] -> nil
+    end
+  end
+
+  defp ensure_peers_connected(old_node, new_node) do
+    try do
+      :erpc.call(new_node, Node, :connect, [old_node], 5_000)
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  # Two-phase graceful shutdown:
+  #
+  # Phase 1: Suspend the HTTP listener via ThousandIsland.suspend/1. This
+  # closes the listening socket (SO_REUSEPORT removes it → all new connections
+  # go to the new peer) while keeping existing connections alive and serving.
+  # Much lighter than stopping the whole Endpoint — PubSub, channels, and
+  # LiveView connections all stay up.
+  #
+  # Phase 2: :init.stop() for full OTP shutdown. The Endpoint drains remaining
+  # connections as part of its normal supervisor shutdown. GenServers get
+  # terminate/2 (can hand off to new peer — distribution is still alive).
+  # Kernel shuts down last → BEAM exits.
+  @peer_shutdown_timeout 30_000
+
+  defp graceful_stop_peer(peer_pid, peer_node, endpoint) do
+    Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
+    ref = Process.monitor(peer_pid)
+
+    # Phase 1: Suspend HTTP listener (close listening socket, keep existing connections)
+    if endpoint do
+      suspend_http_listener(peer_node, endpoint)
+    end
+
+    # Phase 2: Full graceful shutdown
+    try do
+      :erpc.call(peer_node, :init, :stop, [], 5_000)
+    catch
+      :exit, _ -> :ok
+    end
+
+    # Wait for the peer process to actually exit
+    receive do
+      {:DOWN, ^ref, :process, ^peer_pid, _reason} ->
+        Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully")
+    after
+      @peer_shutdown_timeout ->
+        Logger.warning(
+          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{@peer_shutdown_timeout}ms, forcing"
+        )
+
+        try do
+          :peer.stop(peer_pid)
+        catch
+          :exit, _ -> :ok
+        end
+    end
+
+    Process.demonitor(ref, [:flush])
+  end
+
+  # Suspends the Bandit HTTP listener on the old peer. The Bandit pid IS the
+  # ThousandIsland server — ThousandIsland.suspend/1 closes the listening socket
+  # (SO_REUSEPORT drops it) but keeps existing connections alive and serving.
+  defp suspend_http_listener(peer_node, endpoint) do
+    try do
+      :erpc.call(peer_node, fn ->
+        # Bandit and ThousandIsland are runtime deps on the peer, not compile-time
+        # deps of fly_deploy. Use apply/3 to avoid undefined module warnings.
+        case apply(Bandit.PhoenixAdapter, :bandit_pid, [endpoint, :http]) do
+          {:ok, bandit_pid} ->
+            apply(ThousandIsland, :suspend, [bandit_pid])
+            Logger.info("[BlueGreen.PeerManager] HTTP listener suspended")
+
+          {:error, _} ->
+            Logger.warning("[BlueGreen.PeerManager] Could not find Bandit pid to suspend")
+        end
+      end, 5_000)
+    catch
+      :exit, _ ->
+        Logger.warning("[BlueGreen.PeerManager] Failed to suspend HTTP listener")
     end
   end
 
@@ -677,28 +812,6 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       )
   end
 
-  # -- Cutover ---------------------------------------------------------------
-
-  defp cutover(state, _new_node) do
-    old_node = state.active_node
-    endpoint = state.endpoint
-
-    # The new peer's Endpoint is already running and bound via reuseport
-    # (started during the blocking erpc.call in start_peer).
-    # Just stop the old Endpoint so only the new peer remains on the port.
-    if endpoint do
-      Logger.info("[BlueGreen.PeerManager] Stopping endpoint #{endpoint} on #{old_node}")
-
-      try do
-        :erpc.call(old_node, GenServer, :stop, [endpoint])
-      catch
-        :exit, _ -> :ok
-      end
-    end
-
-    :ok
-  end
-
   # -- Release config loading ------------------------------------------------
 
   # Loads compile-time and runtime config into the peer's application env.
@@ -719,7 +832,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         case :file.consult(String.to_charlist(sys_config_path)) do
           {:ok, [configs]} when is_list(configs) ->
             for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
-              for {key, val} <- kvs do
+              for {key, val} <- kvs, key != :config_providers do
                 Application.put_env(app, key, val, persistent: true)
               end
             end

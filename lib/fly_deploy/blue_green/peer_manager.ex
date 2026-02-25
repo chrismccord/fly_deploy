@@ -293,10 +293,14 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             # (e.g., Horde handoff, volume access transfer in terminate/2).
             ensure_peers_connected(state.active_node, peer_node)
 
-            # Gracefully shut down the old peer (drains connections, cleans up).
-            # Distribution stays alive until kernel shuts down last, so the
-            # old peer remains meshed throughout its entire shutdown sequence.
-            graceful_stop_peer(state.active_peer, state.active_node)
+            # Gracefully shut down the old peer:
+            # 1. Stop Endpoint first → closes listening socket (SO_REUSEPORT
+            #    removes it, all new connections go to new peer) → Bandit
+            #    drains in-flight requests
+            # 2. :init.stop() → full OTP shutdown (terminate/2, cleanup, etc.)
+            #    Distribution stays alive until kernel shuts down last, so the
+            #    old peer remains meshed throughout its entire shutdown sequence.
+            graceful_stop_peer(state.active_peer, state.active_node, state.endpoint)
 
             Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
@@ -702,19 +706,31 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
-  # Graceful shutdown: tells the peer to run :init.stop(), which triggers the
-  # full OTP supervision tree shutdown. Endpoint drains connections, GenServers
-  # get terminate/2 called, ETS tables are cleaned up, etc. We monitor the
-  # peer process and wait for it to exit (with a timeout fallback).
+  # Two-phase graceful shutdown:
+  #
+  # Phase 1: Suspend the HTTP listener via ThousandIsland.suspend/1. This
+  # closes the listening socket (SO_REUSEPORT removes it → all new connections
+  # go to the new peer) while keeping existing connections alive and serving.
+  # Much lighter than stopping the whole Endpoint — PubSub, channels, and
+  # LiveView connections all stay up.
+  #
+  # Phase 2: :init.stop() for full OTP shutdown. The Endpoint drains remaining
+  # connections as part of its normal supervisor shutdown. GenServers get
+  # terminate/2 (can hand off to new peer — distribution is still alive).
+  # Kernel shuts down last → BEAM exits.
   @peer_shutdown_timeout 30_000
 
-  defp graceful_stop_peer(peer_pid, peer_node) do
+  defp graceful_stop_peer(peer_pid, peer_node, endpoint) do
     Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
     ref = Process.monitor(peer_pid)
 
+    # Phase 1: Suspend HTTP listener (close listening socket, keep existing connections)
+    if endpoint do
+      suspend_http_listener(peer_node, endpoint)
+    end
+
+    # Phase 2: Full graceful shutdown
     try do
-      # :init.stop() is async — it starts the shutdown sequence and returns :ok.
-      # The BEAM process exits after all applications have stopped.
       :erpc.call(peer_node, :init, :stop, [], 5_000)
     catch
       :exit, _ -> :ok
@@ -738,6 +754,33 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
 
     Process.demonitor(ref, [:flush])
+  end
+
+  # Suspends the Bandit HTTP listener on the old peer. The Bandit pid IS the
+  # ThousandIsland server — ThousandIsland.suspend/1 closes the listening socket
+  # (SO_REUSEPORT drops it) but keeps existing connections alive and serving.
+  defp suspend_http_listener(peer_node, endpoint) do
+    try do
+      :erpc.call(
+        peer_node,
+        fn ->
+          # Bandit and ThousandIsland are runtime deps on the peer, not compile-time
+          # deps of fly_deploy. Use apply/3 to avoid undefined module warnings.
+          case apply(Bandit.PhoenixAdapter, :bandit_pid, [endpoint, :http]) do
+            {:ok, bandit_pid} ->
+              apply(ThousandIsland, :suspend, [bandit_pid])
+              Logger.info("[BlueGreen.PeerManager] HTTP listener suspended")
+
+            {:error, _} ->
+              Logger.warning("[BlueGreen.PeerManager] Could not find Bandit pid to suspend")
+          end
+        end,
+        5_000
+      )
+    catch
+      :exit, _ ->
+        Logger.warning("[BlueGreen.PeerManager] Failed to suspend HTTP listener")
+    end
   end
 
   defp stop_peer(peer_pid, peer_node) do

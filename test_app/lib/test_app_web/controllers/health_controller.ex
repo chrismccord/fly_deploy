@@ -24,7 +24,7 @@ defmodule TestAppWeb.HealthController do
       end
 
     json(conn, %{
-      status: "ok-v3",
+      status: "ok-v2-hot",
       components_defined: Code.ensure_loaded?(FlyDeploy.Components),
       fly_deploy_vsn: fly_deploy_vsn,
       compile_config: Application.get_env(:test_app, :compile_version),

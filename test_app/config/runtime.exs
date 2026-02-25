@@ -15,7 +15,7 @@ if config_env() == :prod do
   config :test_app, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   # Runtime config version — evaluated fresh at each boot
-  config :test_app, :runtime_version, "v3"
+  config :test_app, :runtime_version, "v2"
 
   config :test_app, TestAppWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
