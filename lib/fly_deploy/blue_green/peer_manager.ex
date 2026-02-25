@@ -288,10 +288,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       {:ok, new_paths, release_dir} ->
         case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint) do
           {:ok, peer_pid, peer_node} ->
-            # Peer is fully started with Endpoint bound via reuseport.
-            # Just stop the old peer.
-            :ok = cutover(state, peer_node)
-            stop_peer(state.active_peer, state.active_node)
+            # New peer is fully started with Endpoint bound via reuseport.
+            # Gracefully shut down the old peer (drains connections, cleans up).
+            graceful_stop_peer(state.active_peer, state.active_node)
 
             Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
@@ -682,6 +681,44 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
+  # Graceful shutdown: tells the peer to run :init.stop(), which triggers the
+  # full OTP supervision tree shutdown. Endpoint drains connections, GenServers
+  # get terminate/2 called, ETS tables are cleaned up, etc. We monitor the
+  # peer process and wait for it to exit (with a timeout fallback).
+  @peer_shutdown_timeout 30_000
+
+  defp graceful_stop_peer(peer_pid, peer_node) do
+    Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
+    ref = Process.monitor(peer_pid)
+
+    try do
+      # :init.stop() is async — it starts the shutdown sequence and returns :ok.
+      # The BEAM process exits after all applications have stopped.
+      :erpc.call(peer_node, :init, :stop, [], 5_000)
+    catch
+      :exit, _ -> :ok
+    end
+
+    # Wait for the peer process to actually exit
+    receive do
+      {:DOWN, ^ref, :process, ^peer_pid, _reason} ->
+        Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully")
+    after
+      @peer_shutdown_timeout ->
+        Logger.warning(
+          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{@peer_shutdown_timeout}ms, forcing"
+        )
+
+        try do
+          :peer.stop(peer_pid)
+        catch
+          :exit, _ -> :ok
+        end
+    end
+
+    Process.demonitor(ref, [:flush])
+  end
+
   defp stop_peer(peer_pid, peer_node) do
     Logger.info("[BlueGreen.PeerManager] Stopping peer #{peer_node}")
 
@@ -713,28 +750,6 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       Logger.warning(
         "[BlueGreen.PeerManager] Failed to inject reuseport: #{Exception.message(e)}"
       )
-  end
-
-  # -- Cutover ---------------------------------------------------------------
-
-  defp cutover(state, _new_node) do
-    old_node = state.active_node
-    endpoint = state.endpoint
-
-    # The new peer's Endpoint is already running and bound via reuseport
-    # (started during the blocking erpc.call in start_peer).
-    # Just stop the old Endpoint so only the new peer remains on the port.
-    if endpoint do
-      Logger.info("[BlueGreen.PeerManager] Stopping endpoint #{endpoint} on #{old_node}")
-
-      try do
-        :erpc.call(old_node, GenServer, :stop, [endpoint])
-      catch
-        :exit, _ -> :ok
-      end
-    end
-
-    :ok
   end
 
   # -- Release config loading ------------------------------------------------
