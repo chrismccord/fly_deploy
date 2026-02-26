@@ -352,6 +352,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
               "[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node} " <>
                 "(start: #{start_elapsed}ms, shutdown: #{stop_elapsed}ms)"
             )
+
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
 
           {:error, reason} ->
@@ -789,9 +790,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       {:DOWN, ^ref, :process, ^peer_pid, _reason} ->
         elapsed = System.monotonic_time(:millisecond) - stop_start
 
-        Logger.info(
-          "[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully (#{elapsed}ms)"
-        )
+        Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully (#{elapsed}ms)")
     after
       shutdown_timeout || :infinity ->
         elapsed = System.monotonic_time(:millisecond) - stop_start

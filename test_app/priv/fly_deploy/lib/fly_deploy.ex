@@ -230,11 +230,11 @@ defmodule FlyDeploy do
 
   ## Example
 
-      FlyDeploy.peer_nodes()
+      FlyDeploy.list_remote_peers()
       #=> [:"my_app_peer_818@fdaa:28:186d:a7b:577:86b0:d474:2"]
 
   """
-  def peer_nodes do
+  def list_remote_peers do
     Node.list()
     |> Enum.filter(fn node ->
       node |> Atom.to_string() |> String.contains?("_peer_")
