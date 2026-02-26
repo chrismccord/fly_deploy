@@ -193,6 +193,7 @@ defmodule FlyDeploy do
   before other processes start.
   """
   defdelegate child_spec(opts), to: FlyDeploy.Poller
+  defdelegate peer_node(), to: FlyDeploy.BlueGreen.PeerManager
 
   @doc """
   Returns the current code version fingerprint.
