@@ -274,9 +274,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # instead of starting with old code and waiting for the Poller to re-upgrade.
     {code_paths, peer_opts} = resolve_startup_code(otp_app)
     peer_opts = Keyword.put(peer_opts, :endpoint, state.endpoint)
-    {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
 
-    Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node}")
+    start_time = System.monotonic_time(:millisecond)
+    {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
+    elapsed = System.monotonic_time(:millisecond) - start_time
+
+    Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node} (#{elapsed}ms)")
     {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
   end
 
@@ -296,8 +299,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   end
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
     if state.active_peer do
+      Logger.info(
+        "[BlueGreen.PeerManager] PeerManager terminating (reason: #{inspect(reason)}), stopping active peer"
+      )
+
       graceful_stop_peer(state.active_peer, state.active_node, state.shutdown_timeout)
     end
 
@@ -311,6 +318,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
+        start_time = System.monotonic_time(:millisecond)
+
         case start_new_peer(
                state.otp_app,
                new_paths,
@@ -319,17 +328,30 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
                state.active_node
              ) do
           {:ok, peer_pid, peer_node} ->
+            start_elapsed = System.monotonic_time(:millisecond) - start_time
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Incoming peer #{peer_node} started (#{start_elapsed}ms)"
+            )
+
             # New peer is fully started with Endpoint bound via reuseport.
             # The new peer was connected to the old peer BEFORE its sup tree
             # started (inside start_peer), so lock checks, DurableServer, etc. could
             # already see the outgoing node during boot.
+            stop_time = System.monotonic_time(:millisecond)
+
             graceful_stop_peer(
               state.active_peer,
               state.active_node,
               state.shutdown_timeout
             )
 
-            Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
+            stop_elapsed = System.monotonic_time(:millisecond) - stop_time
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node} " <>
+                "(start: #{start_elapsed}ms, shutdown: #{stop_elapsed}ms)"
+            )
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
 
           {:error, reason} ->
@@ -753,8 +775,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   # we wait that long and then force-kill the peer with :peer.stop/1.
 
   defp graceful_stop_peer(peer_pid, peer_node, shutdown_timeout) do
-    Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
+    Logger.info("[BlueGreen.PeerManager] Sending :init.stop() to peer #{peer_node}")
     ref = Process.monitor(peer_pid)
+    stop_start = System.monotonic_time(:millisecond)
 
     try do
       :erpc.call(peer_node, :init, :stop, [], 5_000)
@@ -764,11 +787,17 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     receive do
       {:DOWN, ^ref, :process, ^peer_pid, _reason} ->
-        Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully")
+        elapsed = System.monotonic_time(:millisecond) - stop_start
+
+        Logger.info(
+          "[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully (#{elapsed}ms)"
+        )
     after
       shutdown_timeout || :infinity ->
+        elapsed = System.monotonic_time(:millisecond) - stop_start
+
         Logger.warning(
-          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{shutdown_timeout}ms, force-killing"
+          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{elapsed}ms, force-killing"
         )
 
         stop_peer(peer_pid, peer_node)
