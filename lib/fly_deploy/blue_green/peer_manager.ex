@@ -286,7 +286,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
-        case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint, state.active_node) do
+        case start_new_peer(
+               state.otp_app,
+               new_paths,
+               release_dir,
+               state.endpoint,
+               state.active_node
+             ) do
           {:ok, peer_pid, peer_node} ->
             # New peer is fully started with Endpoint bound via reuseport.
             # The new peer was connected to the old peer BEFORE its sup tree
