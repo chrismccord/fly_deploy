@@ -286,20 +286,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
-        case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint) do
+        case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint, state.active_node) do
           {:ok, peer_pid, peer_node} ->
             # New peer is fully started with Endpoint bound via reuseport.
-            # Ensure old and new peers can see each other for process handoff
-            # (e.g., Horde handoff, volume access transfer in terminate/2).
-            ensure_peers_connected(state.active_node, peer_node)
-
-            # Gracefully shut down the old peer:
-            # 1. Stop Endpoint first → closes listening socket (SO_REUSEPORT
-            #    removes it, all new connections go to new peer) → Bandit
-            #    drains in-flight requests
-            # 2. :init.stop() → full OTP shutdown (terminate/2, cleanup, etc.)
-            #    Distribution stays alive until kernel shuts down last, so the
-            #    old peer remains meshed throughout its entire shutdown sequence.
+            # The new peer was connected to the old peer BEFORE its sup tree
+            # started (inside start_peer), so lock checks, DurableServer, etc. could
+            # already see the outgoing node during boot.
             graceful_stop_peer(state.active_peer, state.active_node, state.endpoint)
 
             Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
@@ -493,10 +485,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end)
   end
 
-  defp start_new_peer(otp_app, code_paths, release_dir, endpoint) do
+  defp start_new_peer(otp_app, code_paths, release_dir, endpoint, active_node) do
     try do
       opts = if release_dir, do: [release_dir: release_dir], else: []
       opts = if endpoint, do: Keyword.put(opts, :endpoint, endpoint), else: opts
+      opts = if active_node, do: Keyword.put(opts, :active_node, active_node), else: opts
       {peer_pid, peer_node} = start_peer(otp_app, code_paths, opts)
       {:ok, peer_pid, peer_node}
     rescue
@@ -580,6 +573,22 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     if endpoint do
       inject_reuseport(node, otp_app, endpoint)
+    end
+
+    # Connect to the outgoing peer BEFORE starting the user's app. This is
+    # critical for processes that check lock freshness on boot (e.g., verifying
+    # a Litestream lock holder is reachable) or need to coordinate handoff
+    # (e.g., releasing a volume lock before the incoming peer grabs it).
+    # Without this, the new peer's sup tree would start in isolation and could
+    # race with the still-running outgoing peer for shared resources.
+    active_node = Keyword.get(opts, :active_node)
+
+    if active_node do
+      :erpc.call(node, Node, :connect, [active_node], 5_000)
+
+      Logger.info(
+        "[BlueGreen.PeerManager] Connected incoming peer #{node} to outgoing peer #{active_node}"
+      )
     end
 
     # Start the user's OTP app — blocks until fully started (including Endpoint).
@@ -698,38 +707,17 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
-  defp ensure_peers_connected(old_node, new_node) do
-    try do
-      :erpc.call(new_node, Node, :connect, [old_node], 5_000)
-    catch
-      :exit, _ -> :ok
-    end
-  end
-
-  # Two-phase graceful shutdown:
-  #
-  # Phase 1: Suspend the HTTP listener via ThousandIsland.suspend/1. This
-  # closes the listening socket (SO_REUSEPORT removes it → all new connections
-  # go to the new peer) while keeping existing connections alive and serving.
-  # Much lighter than stopping the whole Endpoint — PubSub, channels, and
-  # LiveView connections all stay up.
-  #
-  # Phase 2: :init.stop() for full OTP shutdown. The Endpoint drains remaining
-  # connections as part of its normal supervisor shutdown. GenServers get
-  # terminate/2 (can hand off to new peer — distribution is still alive).
-  # Kernel shuts down last → BEAM exits.
+  # Graceful shutdown via :init.stop(). This triggers the full OTP supervision
+  # tree shutdown: Endpoint drains connections (Bandit/ThousandIsland closes the
+  # listening socket and finishes in-flight requests), GenServers get terminate/2
+  # (can hand off to new peer — distribution stays alive until kernel shuts down
+  # last), ETS tables are cleaned up, etc.
   @peer_shutdown_timeout 30_000
 
-  defp graceful_stop_peer(peer_pid, peer_node, endpoint) do
+  defp graceful_stop_peer(peer_pid, peer_node, _endpoint) do
     Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
     ref = Process.monitor(peer_pid)
 
-    # Phase 1: Suspend HTTP listener (close listening socket, keep existing connections)
-    if endpoint do
-      suspend_http_listener(peer_node, endpoint)
-    end
-
-    # Phase 2: Full graceful shutdown
     try do
       :erpc.call(peer_node, :init, :stop, [], 5_000)
     catch
@@ -754,33 +742,6 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
 
     Process.demonitor(ref, [:flush])
-  end
-
-  # Suspends the Bandit HTTP listener on the old peer. The Bandit pid IS the
-  # ThousandIsland server — ThousandIsland.suspend/1 closes the listening socket
-  # (SO_REUSEPORT drops it) but keeps existing connections alive and serving.
-  defp suspend_http_listener(peer_node, endpoint) do
-    try do
-      :erpc.call(
-        peer_node,
-        fn ->
-          # Bandit and ThousandIsland are runtime deps on the peer, not compile-time
-          # deps of fly_deploy. Use apply/3 to avoid undefined module warnings.
-          case apply(Bandit.PhoenixAdapter, :bandit_pid, [endpoint, :http]) do
-            {:ok, bandit_pid} ->
-              apply(ThousandIsland, :suspend, [bandit_pid])
-              Logger.info("[BlueGreen.PeerManager] HTTP listener suspended")
-
-            {:error, _} ->
-              Logger.warning("[BlueGreen.PeerManager] Could not find Bandit pid to suspend")
-          end
-        end,
-        5_000
-      )
-    catch
-      :exit, _ ->
-        Logger.warning("[BlueGreen.PeerManager] Failed to suspend HTTP listener")
-    end
   end
 
   defp stop_peer(peer_pid, peer_node) do

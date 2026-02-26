@@ -290,7 +290,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
           {:ok, peer_pid, peer_node} ->
             # New peer is fully started with Endpoint bound via reuseport.
             # Ensure old and new peers can see each other for process handoff
-            # (e.g., Horde handoff, volume access transfer in terminate/2).
+            # (e.g., DurableServer handoff, volume access transfer in terminate/2).
             ensure_peers_connected(state.active_node, peer_node)
 
             # Gracefully shut down the old peer:
