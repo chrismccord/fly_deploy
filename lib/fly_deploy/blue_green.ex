@@ -44,6 +44,9 @@ defmodule FlyDeploy.BlueGreen do
   - `:start` - `{module, function, args}` MFA for starting your supervision tree (required)
   - `:endpoint` - Your Phoenix Endpoint module (auto-detected if not given)
   - `:poll_interval` - How often to poll S3 in ms (default: 1000)
+  - `:shutdown_timeout` - Max time in ms to wait for the outgoing peer to shut down
+    before force-killing it. `nil` (default) means wait indefinitely, trusting
+    the app's supervision tree timeouts.
   """
 
   require Logger
@@ -84,7 +87,8 @@ defmodule FlyDeploy.BlueGreen do
     FlyDeploy.BlueGreen.Supervisor.start_link(
       otp_app: otp_app,
       endpoint: Keyword.get(opts, :endpoint),
-      poll_interval: Keyword.get(opts, :poll_interval, 1_000)
+      poll_interval: Keyword.get(opts, :poll_interval, 1_000),
+      shutdown_timeout: Keyword.get(opts, :shutdown_timeout)
     )
   end
 

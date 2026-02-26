@@ -210,6 +210,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   defstruct [
     :otp_app,
     :endpoint,
+    :shutdown_timeout,
     :active_peer,
     :active_node,
     :upgrading_peer,
@@ -218,6 +219,19 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Override child_spec to use :infinity shutdown. The default GenServer
+  # shutdown of 5_000ms is too short — when the BlueGreen.Supervisor shuts
+  # down (machine restart, cold deploy), PeerManager needs time to gracefully
+  # stop the active peer. We let the peer's own supervision tree timeouts
+  # govern how long that takes.
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      shutdown: :infinity
+    }
   end
 
   @doc """
@@ -246,10 +260,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   def init(opts) do
     otp_app = Keyword.fetch!(opts, :otp_app)
     endpoint = Keyword.get(opts, :endpoint)
+    shutdown_timeout = Keyword.get(opts, :shutdown_timeout)
 
     state = %__MODULE__{
       otp_app: otp_app,
-      endpoint: endpoint || detect_endpoint(otp_app)
+      endpoint: endpoint || detect_endpoint(otp_app),
+      shutdown_timeout: shutdown_timeout
     }
 
     # Check for a pending upgrade to reapply on startup.
@@ -279,6 +295,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
+  @impl true
+  def terminate(_reason, state) do
+    if state.active_peer do
+      graceful_stop_peer(state.active_peer, state.active_node, state.shutdown_timeout)
+    end
+
+    :ok
+  end
+
   # -- Upgrade flow ----------------------------------------------------------
 
   defp do_upgrade(tarball_url, state) do
@@ -298,7 +323,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             # The new peer was connected to the old peer BEFORE its sup tree
             # started (inside start_peer), so lock checks, DurableServer, etc. could
             # already see the outgoing node during boot.
-            graceful_stop_peer(state.active_peer, state.active_node, state.endpoint)
+            graceful_stop_peer(
+              state.active_peer,
+              state.active_node,
+              state.shutdown_timeout
+            )
 
             Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
@@ -718,9 +747,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   # listening socket and finishes in-flight requests), GenServers get terminate/2
   # (can hand off to new peer — distribution stays alive until kernel shuts down
   # last), ETS tables are cleaned up, etc.
-  @peer_shutdown_timeout 30_000
+  #
+  # If shutdown_timeout is nil, we wait indefinitely — :init.stop() respects
+  # each supervisor's configured shutdown timeouts. If shutdown_timeout is set,
+  # we wait that long and then force-kill the peer with :peer.stop/1.
 
-  defp graceful_stop_peer(peer_pid, peer_node, _endpoint) do
+  defp graceful_stop_peer(peer_pid, peer_node, shutdown_timeout) do
     Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
     ref = Process.monitor(peer_pid)
 
@@ -730,21 +762,16 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       :exit, _ -> :ok
     end
 
-    # Wait for the peer process to actually exit
     receive do
       {:DOWN, ^ref, :process, ^peer_pid, _reason} ->
         Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully")
     after
-      @peer_shutdown_timeout ->
+      shutdown_timeout || :infinity ->
         Logger.warning(
-          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{@peer_shutdown_timeout}ms, forcing"
+          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{shutdown_timeout}ms, force-killing"
         )
 
-        try do
-          :peer.stop(peer_pid)
-        catch
-          :exit, _ -> :ok
-        end
+        stop_peer(peer_pid, peer_node)
     end
 
     Process.demonitor(ref, [:flush])
