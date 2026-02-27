@@ -1,11 +1,11 @@
-# Cache buster: 1772084482506130005
+# Cache buster: 1772201560874297613
 defmodule TestApp.Counter do
   @moduledoc """
   A simple GenServer counter for testing deploys.
   """
   use GenServer
 
-  @counter_vsn "v3"
+  @counter_vsn "v2"
 
   defmodule State do
     @moduledoc false
@@ -36,7 +36,7 @@ defmodule TestApp.Counter do
 
   @impl true
   def init(_opts) do
-    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v3"}}
+    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v2"}}
   end
 
   @impl true

@@ -200,7 +200,8 @@ defmodule FlyDeploy.Upgrader do
           |> Path.split()
 
         # target path on the running system
-        target_path = Path.join(["/app/releases", version, "consolidated", beam_filename])
+        releases_dir = Path.join(to_string(:code.root_dir()), "releases")
+        target_path = Path.join([releases_dir, version, "consolidated", beam_filename])
 
         # ensure the consolidated directory exists
         target_dir = Path.dirname(target_path)
@@ -414,7 +415,8 @@ defmodule FlyDeploy.Upgrader do
           |> Path.split()
 
         # target path on the running system
-        target_path = Path.join(["/app/releases", version, "consolidated", beam_filename])
+        releases_dir = Path.join(to_string(:code.root_dir()), "releases")
+        target_path = Path.join([releases_dir, version, "consolidated", beam_filename])
 
         # ensure the consolidated directory exists
         target_dir = Path.dirname(target_path)
@@ -801,7 +803,9 @@ defmodule FlyDeploy.Upgrader do
 
   defp reload_consolidated_protocols do
     # find all consolidated protocol beams in the release
-    case Path.wildcard("/app/releases/*/consolidated/*.beam") do
+    releases_dir = Path.join(to_string(:code.root_dir()), "releases")
+
+    case Path.wildcard(Path.join([releases_dir, "*", "consolidated", "*.beam"])) do
       [] ->
         Logger.info("[#{inspect(__MODULE__)}] No consolidated protocols found")
 
@@ -834,20 +838,39 @@ defmodule FlyDeploy.Upgrader do
       Path.wildcard(Path.join([upgrade_dir, "lib", "#{app}-*", "priv", "static", "**", "*"]))
       |> Enum.filter(&File.regular?/1)
 
-    Enum.reduce(static_files, 0, fn src_path, acc ->
-      # Extract relative path from upgrade_dir
-      # e.g., lib/test_app-0.1.0/priv/static/assets/app.css
-      rel_path = String.replace_prefix(src_path, upgrade_dir <> "/", "")
+    # Use Application.app_dir to find the correct priv/static location.
+    # In a blue-green peer, code is loaded from /tmp/fly_deploy_bg_<ts>/lib/
+    # not /app/lib/, so we can't hardcode /app/.
+    app_dir = Application.app_dir(app) |> to_string()
 
-      # Target path on the running system
-      dest_path = Path.join("/app", rel_path)
+    # Extract the tarball's app-version dir name to strip from relative paths
+    # e.g., "sprites-0.1.12" from lib/sprites-0.1.12/priv/static/...
+    tarball_app_dirs =
+      Path.wildcard(Path.join([upgrade_dir, "lib", "#{app}-*"]))
+      |> Enum.filter(&File.dir?/1)
 
-      # Ensure target directory exists
-      dest_dir = Path.dirname(dest_path)
-      File.mkdir_p!(dest_dir)
-      File.cp!(src_path, dest_path)
-      acc + 1
-    end)
+    tarball_app_prefix =
+      case tarball_app_dirs do
+        [dir | _] -> dir <> "/"
+        [] -> nil
+      end
+
+    if tarball_app_prefix do
+      Enum.reduce(static_files, 0, fn src_path, acc ->
+        # Extract path relative to the app dir in the tarball
+        # e.g., "priv/static/assets/app.css"
+        rel_path = String.replace_prefix(src_path, tarball_app_prefix, "")
+
+        # Target path under the running app's directory
+        dest_path = Path.join(app_dir, rel_path)
+
+        File.mkdir_p!(Path.dirname(dest_path))
+        File.cp!(src_path, dest_path)
+        acc + 1
+      end)
+    else
+      0
+    end
   end
 
   defp reset_static_cache(app) do

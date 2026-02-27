@@ -280,6 +280,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     elapsed = System.monotonic_time(:millisecond) - start_time
 
     Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node} (#{elapsed}ms)")
+    cleanup_old_extract_dirs()
     {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
   end
 
@@ -347,6 +348,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             )
 
             stop_elapsed = System.monotonic_time(:millisecond) - stop_time
+
+            cleanup_old_extract_dirs()
 
             Logger.info(
               "[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node} " <>
@@ -991,6 +994,27 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       )
 
       :none
+  end
+
+  # -- Tmp dir cleanup -------------------------------------------------------
+
+  # How many old extraction directories to keep around (for potential rollback).
+  @keep_dirs 3
+
+  defp cleanup_old_extract_dirs do
+    tmp = System.tmp_dir!()
+
+    dirs =
+      Path.wildcard(Path.join(tmp, "fly_deploy_bg_*"))
+      |> Enum.filter(&File.dir?/1)
+      |> Enum.sort(:desc)
+
+    stale = Enum.drop(dirs, @keep_dirs)
+
+    for dir <- stale do
+      Logger.info("[BlueGreen.PeerManager] Cleaning up old extract dir: #{dir}")
+      File.rm_rf!(dir)
+    end
   end
 
   # -- Code paths ------------------------------------------------------------

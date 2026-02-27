@@ -210,6 +210,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   defstruct [
     :otp_app,
     :endpoint,
+    :shutdown_timeout,
     :active_peer,
     :active_node,
     :upgrading_peer,
@@ -218,6 +219,19 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Override child_spec to use :infinity shutdown. The default GenServer
+  # shutdown of 5_000ms is too short — when the BlueGreen.Supervisor shuts
+  # down (machine restart, cold deploy), PeerManager needs time to gracefully
+  # stop the active peer. We let the peer's own supervision tree timeouts
+  # govern how long that takes.
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      shutdown: :infinity
+    }
   end
 
   @doc """
@@ -246,10 +260,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   def init(opts) do
     otp_app = Keyword.fetch!(opts, :otp_app)
     endpoint = Keyword.get(opts, :endpoint)
+    shutdown_timeout = Keyword.get(opts, :shutdown_timeout)
 
     state = %__MODULE__{
       otp_app: otp_app,
-      endpoint: endpoint || detect_endpoint(otp_app)
+      endpoint: endpoint || detect_endpoint(otp_app),
+      shutdown_timeout: shutdown_timeout
     }
 
     # Check for a pending upgrade to reapply on startup.
@@ -258,9 +274,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # instead of starting with old code and waiting for the Poller to re-upgrade.
     {code_paths, peer_opts} = resolve_startup_code(otp_app)
     peer_opts = Keyword.put(peer_opts, :endpoint, state.endpoint)
-    {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
 
-    Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node}")
+    start_time = System.monotonic_time(:millisecond)
+    {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
+    elapsed = System.monotonic_time(:millisecond) - start_time
+
+    Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node} (#{elapsed}ms)")
+    cleanup_old_extract_dirs()
     {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
   end
 
@@ -279,6 +299,19 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
+  @impl true
+  def terminate(reason, state) do
+    if state.active_peer do
+      Logger.info(
+        "[BlueGreen.PeerManager] PeerManager terminating (reason: #{inspect(reason)}), stopping active peer"
+      )
+
+      graceful_stop_peer(state.active_peer, state.active_node, state.shutdown_timeout)
+    end
+
+    :ok
+  end
+
   # -- Upgrade flow ----------------------------------------------------------
 
   defp do_upgrade(tarball_url, state) do
@@ -286,15 +319,43 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
-        case start_new_peer(state.otp_app, new_paths, release_dir, state.endpoint, state.active_node) do
+        start_time = System.monotonic_time(:millisecond)
+
+        case start_new_peer(
+               state.otp_app,
+               new_paths,
+               release_dir,
+               state.endpoint,
+               state.active_node
+             ) do
           {:ok, peer_pid, peer_node} ->
+            start_elapsed = System.monotonic_time(:millisecond) - start_time
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Incoming peer #{peer_node} started (#{start_elapsed}ms)"
+            )
+
             # New peer is fully started with Endpoint bound via reuseport.
             # The new peer was connected to the old peer BEFORE its sup tree
             # started (inside start_peer), so lock checks, DurableServer, etc. could
             # already see the outgoing node during boot.
-            graceful_stop_peer(state.active_peer, state.active_node, state.endpoint)
+            stop_time = System.monotonic_time(:millisecond)
 
-            Logger.info("[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node}")
+            graceful_stop_peer(
+              state.active_peer,
+              state.active_node,
+              state.shutdown_timeout
+            )
+
+            stop_elapsed = System.monotonic_time(:millisecond) - stop_time
+
+            cleanup_old_extract_dirs()
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node} " <>
+                "(start: #{start_elapsed}ms, shutdown: #{stop_elapsed}ms)"
+            )
+
             {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
 
           {:error, reason} ->
@@ -712,11 +773,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   # listening socket and finishes in-flight requests), GenServers get terminate/2
   # (can hand off to new peer — distribution stays alive until kernel shuts down
   # last), ETS tables are cleaned up, etc.
-  @peer_shutdown_timeout 30_000
+  #
+  # If shutdown_timeout is nil, we wait indefinitely — :init.stop() respects
+  # each supervisor's configured shutdown timeouts. If shutdown_timeout is set,
+  # we wait that long and then force-kill the peer with :peer.stop/1.
 
-  defp graceful_stop_peer(peer_pid, peer_node, _endpoint) do
-    Logger.info("[BlueGreen.PeerManager] Gracefully stopping peer #{peer_node}")
+  defp graceful_stop_peer(peer_pid, peer_node, shutdown_timeout) do
+    Logger.info("[BlueGreen.PeerManager] Sending :init.stop() to peer #{peer_node}")
     ref = Process.monitor(peer_pid)
+    stop_start = System.monotonic_time(:millisecond)
 
     try do
       :erpc.call(peer_node, :init, :stop, [], 5_000)
@@ -724,21 +789,20 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       :exit, _ -> :ok
     end
 
-    # Wait for the peer process to actually exit
     receive do
       {:DOWN, ^ref, :process, ^peer_pid, _reason} ->
-        Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully")
+        elapsed = System.monotonic_time(:millisecond) - stop_start
+
+        Logger.info("[BlueGreen.PeerManager] Peer #{peer_node} stopped gracefully (#{elapsed}ms)")
     after
-      @peer_shutdown_timeout ->
+      shutdown_timeout || :infinity ->
+        elapsed = System.monotonic_time(:millisecond) - stop_start
+
         Logger.warning(
-          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{@peer_shutdown_timeout}ms, forcing"
+          "[BlueGreen.PeerManager] Peer #{peer_node} did not stop within #{elapsed}ms, force-killing"
         )
 
-        try do
-          :peer.stop(peer_pid)
-        catch
-          :exit, _ -> :ok
-        end
+        stop_peer(peer_pid, peer_node)
     end
 
     Process.demonitor(ref, [:flush])
@@ -930,6 +994,27 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       )
 
       :none
+  end
+
+  # -- Tmp dir cleanup -------------------------------------------------------
+
+  # How many old extraction directories to keep around (for potential rollback).
+  @keep_dirs 3
+
+  defp cleanup_old_extract_dirs do
+    tmp = System.tmp_dir!()
+
+    dirs =
+      Path.wildcard(Path.join(tmp, "fly_deploy_bg_*"))
+      |> Enum.filter(&File.dir?/1)
+      |> Enum.sort(:desc)
+
+    stale = Enum.drop(dirs, @keep_dirs)
+
+    for dir <- stale do
+      Logger.info("[BlueGreen.PeerManager] Cleaning up old extract dir: #{dir}")
+      File.rm_rf!(dir)
+    end
   end
 
   # -- Code paths ------------------------------------------------------------
