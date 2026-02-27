@@ -1,3 +1,8 @@
+## 0.3.1 (2026-02-27)
+
+### Bug Fixes
+- Do not start blue_green parent as hidden node
+
 ## 0.3.0 (2026-02-27)
 
 ### Enhancements

@@ -54,10 +54,13 @@ defmodule FlyDeploy.Upgrader do
     IO.puts("Downloading tarball from #{tarball_url}...")
     {:ok, _} = Application.ensure_all_started(:req)
 
-    # use AWS SigV4 for authenticated download
+    # Use a unique temp dir per invocation to avoid races between the parent
+    # node's RPC-triggered upgrade and the peer's Poller-triggered upgrade —
+    # both are separate OS processes sharing the same /tmp/ filesystem.
     tmp_dir = System.tmp_dir!()
-    tmp_file_path = Path.join(tmp_dir, "fly_deploy_upgrade.tar.gz")
-    upgrade_dir = Path.join(tmp_dir, "upgrade")
+    uid = :erlang.unique_integer([:positive])
+    tmp_file_path = Path.join(tmp_dir, "fly_deploy_upgrade_#{uid}.tar.gz")
+    upgrade_dir = Path.join(tmp_dir, "fly_deploy_hot_#{uid}")
 
     response =
       Req.get!(tarball_url,
@@ -84,8 +87,6 @@ defmodule FlyDeploy.Upgrader do
     IO.puts("  Downloaded: #{download_size} bytes")
 
     IO.puts("Extracting...")
-    # Clean up any stale files from previous upgrades
-    File.rm_rf!(upgrade_dir)
     File.mkdir_p!(upgrade_dir)
     :ok = :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
@@ -235,6 +236,10 @@ defmodule FlyDeploy.Upgrader do
 
     IO.puts("✅ Hot reload complete!")
 
+    # Clean up temp files now that upgrade is complete
+    File.rm_rf(upgrade_dir)
+    File.rm(tmp_file_path)
+
     {:ok,
      %{
        modules_reloaded: result.modules_reloaded,
@@ -275,8 +280,9 @@ defmodule FlyDeploy.Upgrader do
     {:ok, _} = Application.ensure_all_started(:req)
 
     tmp_dir = System.tmp_dir!()
-    tmp_file_path = Path.join(tmp_dir, "upgrade.tar.gz")
-    upgrade_dir = Path.join(tmp_dir, "upgrade")
+    uid = :erlang.unique_integer([:positive])
+    tmp_file_path = Path.join(tmp_dir, "fly_deploy_upgrade_#{uid}.tar.gz")
+    upgrade_dir = Path.join(tmp_dir, "fly_deploy_hot_#{uid}")
 
     # download tarball
     response =
@@ -303,8 +309,6 @@ defmodule FlyDeploy.Upgrader do
 
     # extract tarball
     IO.puts("Extracting...")
-    # Clean up any stale files from previous upgrades
-    File.rm_rf!(upgrade_dir)
     File.mkdir_p!(upgrade_dir)
     :ok = :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
@@ -479,6 +483,10 @@ defmodule FlyDeploy.Upgrader do
     )
 
     IO.puts("✅ Startup hot upgrade replay complete!")
+
+    # Clean up temp files
+    File.rm_rf(upgrade_dir)
+    File.rm(tmp_file_path)
   end
 
   # Safely upgrades all application processes with new code.
