@@ -16,10 +16,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   │                                                                         │
   │  Parent BEAM (long-lived, never serves traffic)                         │
   │  ├─ BlueGreen.Supervisor                                                │
-  │  │   ├─ PeerManager          ← this module                             │
+  │  │   ├─ PeerManager          ← this module                              │
   │  │   │   • starts/stops peer BEAM processes via :peer                   │
   │  │   │   • handles cutover (stop old Endpoint)                          │
-  │  │   │   • on startup, checks S3 for pending blue-green reapply        │
+  │  │   │   • on startup, checks S3 for pending blue-green reapply         │
   │  │   │                                                                  │
   │  │   └─ Poller (mode: :blue_green)                                      │
   │  │       • polls S3 "blue_green_upgrade" field                          │
@@ -29,13 +29,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   │                                                                         │
   │  Peer BEAM (child process, serves all traffic)                          │
   │  ├─ User's full supervision tree                                        │
-  │  │   ├─ FlyDeploy Poller (mode: :hot)    ← polls "hot_upgrade" field   │
+  │  │   ├─ FlyDeploy Poller (mode: :hot)    ← polls "hot_upgrade" field    │
   │  │   │   • applies hot code upgrades in-place inside the peer           │
   │  │   │   • on startup, checks S3 for pending hot upgrade reapply        │
-  │  │   ├─ Repo, PubSub, Counter, ...                                     │
-  │  │   └─ Endpoint                         ← binds port via reuseport    │
+  │  │   ├─ Repo, PubSub, Counter, ...                                      │
+  │  │   └─ Endpoint                         ← binds port via reuseport     │
   │  │                                                                      │
-  │  └─ Code loaded from /tmp/fly_deploy_bg_<ts>/ (not /app/)              │
+  │  └─ Code loaded from /tmp/fly_deploy_bg_<ts>/ (not /app/)               │
   │                                                                         │
   └─────────────────────────────────────────────────────────────────────────┘
   ```
