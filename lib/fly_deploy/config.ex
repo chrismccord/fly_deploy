@@ -67,7 +67,9 @@ defmodule FlyDeploy.Config do
     :max_concurrency,
     :timeout,
     :suspend_timeout,
-    :version
+    :version,
+    :mode,
+    :endpoint
   ]
 
   @type t :: %__MODULE__{
@@ -79,7 +81,9 @@ defmodule FlyDeploy.Config do
           max_concurrency: pos_integer(),
           timeout: pos_integer(),
           suspend_timeout: pos_integer(),
-          version: String.t()
+          version: String.t(),
+          mode: :hot | :blue_green,
+          endpoint: module() | nil
         }
 
   @doc """
@@ -137,7 +141,9 @@ defmodule FlyDeploy.Config do
       max_concurrency: 20,
       timeout: 60_000,
       suspend_timeout: 10_000,
-      version: get_app_version(otp_app)
+      version: get_app_version(otp_app),
+      mode: :hot,
+      endpoint: nil
     }
   end
 
@@ -176,6 +182,9 @@ defmodule FlyDeploy.Config do
 
       {:max_concurrency, n}, acc ->
         Map.put(acc, :max_concurrency, n)
+
+      {:mode, mode}, acc ->
+        Map.put(acc, :mode, mode)
 
       # Skip flags that aren't config
       {_key, _value}, acc ->

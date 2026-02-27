@@ -200,7 +200,8 @@ defmodule FlyDeploy.Upgrader do
           |> Path.split()
 
         # target path on the running system
-        target_path = Path.join(["/app/releases", version, "consolidated", beam_filename])
+        releases_dir = Path.join(to_string(:code.root_dir()), "releases")
+        target_path = Path.join([releases_dir, version, "consolidated", beam_filename])
 
         # ensure the consolidated directory exists
         target_dir = Path.dirname(target_path)
@@ -223,7 +224,7 @@ defmodule FlyDeploy.Upgrader do
 
     IO.puts("Performing safe hot upgrade...")
 
-    # perform the 4-phase upgrade
+    # perform the 4-phase upgrade (NIF modules are filtered out inside)
     result = safe_upgrade_application(app, opts)
 
     IO.puts("  Modules reloaded: #{result.modules_reloaded}")
@@ -414,7 +415,8 @@ defmodule FlyDeploy.Upgrader do
           |> Path.split()
 
         # target path on the running system
-        target_path = Path.join(["/app/releases", version, "consolidated", beam_filename])
+        releases_dir = Path.join(to_string(:code.root_dir()), "releases")
+        target_path = Path.join([releases_dir, version, "consolidated", beam_filename])
 
         # ensure the consolidated directory exists
         target_dir = Path.dirname(target_path)
@@ -445,8 +447,17 @@ defmodule FlyDeploy.Upgrader do
     end
 
     # Load modified modules using load_binary for embedded mode compatibility
+    # Filter out NIF modules — purging them triggers NIF re-init which can fail
+    # in blue-green peers where .so files may not be at the expected path
     IO.puts("Loading modified modules...")
-    modified_modules = :code.modified_modules()
+    all_modified = :code.modified_modules()
+    {nif_modules, modified_modules} = Enum.split_with(all_modified, &has_nif?/1)
+
+    if nif_modules != [] do
+      Logger.info(
+        "[#{inspect(__MODULE__)}] Skipping #{length(nif_modules)} NIF modules at startup: #{inspect(nif_modules)}"
+      )
+    end
 
     Enum.each(modified_modules, fn module ->
       :code.purge(module)
@@ -481,8 +492,19 @@ defmodule FlyDeploy.Upgrader do
     Logger.info("[#{inspect(__MODULE__)}] Starting safe upgrade for #{app}")
     suspend_timeout = Keyword.get(opts, :suspend_timeout, 3_000)
 
-    # detect changed modules
-    changed_modules = :code.modified_modules()
+    # detect changed modules, filtering out NIF-bearing modules
+    # Purging a NIF module triggers NIF re-initialization which tries to load the .so
+    # file from priv_dir. In blue-green peers, this path points to the extracted tarball
+    # directory where the .so may not exist. NIF code changes require a cold deploy anyway.
+    all_changed = :code.modified_modules()
+    {nif_modules, changed_modules} = Enum.split_with(all_changed, &has_nif?/1)
+
+    if nif_modules != [] do
+      Logger.info(
+        "[#{inspect(__MODULE__)}] Skipping #{length(nif_modules)} NIF modules (require cold deploy): #{inspect(nif_modules)}"
+      )
+    end
+
     Logger.info("[#{inspect(__MODULE__)}] Changed modules: #{inspect(changed_modules)}")
 
     # find all processes that need upgrading BEFORE loading new code
@@ -722,6 +744,26 @@ defmodule FlyDeploy.Upgrader do
     end)
   end
 
+  # Returns true if the module has loaded NIF functions.
+  # NIF modules must NOT be purged/reloaded during hot upgrades because:
+  # 1. Purging unloads the NIF shared object
+  # 2. Reloading triggers NIF re-initialization via on_load
+  # 3. The .so file may not exist at the expected priv_dir path
+  #    (especially in blue-green peers loading code from /tmp/)
+  # 4. NIF code changes require a cold deploy anyway
+  defp has_nif?(module) do
+    try do
+      case module.module_info(:nifs) do
+        [] -> false
+        [_ | _] -> true
+      end
+    rescue
+      _ -> false
+    catch
+      _, _ -> false
+    end
+  end
+
   # returns true if the tarball beam file differs from the currently loaded code
   defp beam_file_changed?(tarball_beam_path, module_name) do
     case :beam_lib.md5(String.to_charlist(tarball_beam_path)) do
@@ -761,7 +803,9 @@ defmodule FlyDeploy.Upgrader do
 
   defp reload_consolidated_protocols do
     # find all consolidated protocol beams in the release
-    case Path.wildcard("/app/releases/*/consolidated/*.beam") do
+    releases_dir = Path.join(to_string(:code.root_dir()), "releases")
+
+    case Path.wildcard(Path.join([releases_dir, "*", "consolidated", "*.beam"])) do
       [] ->
         Logger.info("[#{inspect(__MODULE__)}] No consolidated protocols found")
 
@@ -794,20 +838,39 @@ defmodule FlyDeploy.Upgrader do
       Path.wildcard(Path.join([upgrade_dir, "lib", "#{app}-*", "priv", "static", "**", "*"]))
       |> Enum.filter(&File.regular?/1)
 
-    Enum.reduce(static_files, 0, fn src_path, acc ->
-      # Extract relative path from upgrade_dir
-      # e.g., lib/test_app-0.1.0/priv/static/assets/app.css
-      rel_path = String.replace_prefix(src_path, upgrade_dir <> "/", "")
+    # Use Application.app_dir to find the correct priv/static location.
+    # In a blue-green peer, code is loaded from /tmp/fly_deploy_bg_<ts>/lib/
+    # not /app/lib/, so we can't hardcode /app/.
+    app_dir = Application.app_dir(app) |> to_string()
 
-      # Target path on the running system
-      dest_path = Path.join("/app", rel_path)
+    # Extract the tarball's app-version dir name to strip from relative paths
+    # e.g., "sprites-0.1.12" from lib/sprites-0.1.12/priv/static/...
+    tarball_app_dirs =
+      Path.wildcard(Path.join([upgrade_dir, "lib", "#{app}-*"]))
+      |> Enum.filter(&File.dir?/1)
 
-      # Ensure target directory exists
-      dest_dir = Path.dirname(dest_path)
-      File.mkdir_p!(dest_dir)
-      File.cp!(src_path, dest_path)
-      acc + 1
-    end)
+    tarball_app_prefix =
+      case tarball_app_dirs do
+        [dir | _] -> dir <> "/"
+        [] -> nil
+      end
+
+    if tarball_app_prefix do
+      Enum.reduce(static_files, 0, fn src_path, acc ->
+        # Extract path relative to the app dir in the tarball
+        # e.g., "priv/static/assets/app.css"
+        rel_path = String.replace_prefix(src_path, tarball_app_prefix, "")
+
+        # Target path under the running app's directory
+        dest_path = Path.join(app_dir, rel_path)
+
+        File.mkdir_p!(Path.dirname(dest_path))
+        File.cp!(src_path, dest_path)
+        acc + 1
+      end)
+    else
+      0
+    end
   end
 
   defp reset_static_cache(app) do

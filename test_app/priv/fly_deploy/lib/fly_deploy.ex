@@ -193,6 +193,7 @@ defmodule FlyDeploy do
   before other processes start.
   """
   defdelegate child_spec(opts), to: FlyDeploy.Poller
+  defdelegate peer_node(), to: FlyDeploy.BlueGreen.PeerManager
 
   @doc """
   Returns the current code version fingerprint.
@@ -217,6 +218,29 @@ defmodule FlyDeploy do
 
   """
   defdelegate current_vsn(), to: FlyDeploy.Poller
+
+  @doc """
+  Returns a list of blue-green peer nodes visible to this node.
+
+  Peer nodes are named with a `_peer_` segment (e.g., `my_app_peer_123@fd00::1`).
+  This filters `Node.list/0` to only return peer nodes, excluding parent nodes,
+  remsh sessions, and other non-peer nodes.
+
+  Useful for clustering logic where you want to ignore the hidden parent nodes
+  and only interact with the peers that actually serve traffic.
+
+  ## Example
+
+      FlyDeploy.list_remote_peers()
+      #=> [:"my_app_peer_818@fdaa:28:186d:a7b:577:86b0:d474:2"]
+
+  """
+  def list_remote_peers do
+    Node.list()
+    |> Enum.filter(fn node ->
+      node |> Atom.to_string() |> String.contains?("_peer_")
+    end)
+  end
 
   @doc """
   Deprecated: Use `{FlyDeploy, otp_app: :my_app}` in your supervision tree instead.
