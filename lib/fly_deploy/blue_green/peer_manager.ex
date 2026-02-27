@@ -213,6 +213,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     :shutdown_timeout,
     :active_peer,
     :active_node,
+    :active_ref,
     :upgrading_peer,
     :upgrading_node
   ]
@@ -279,9 +280,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
     elapsed = System.monotonic_time(:millisecond) - start_time
 
+    ref = Process.monitor(peer_pid)
     Logger.info("[BlueGreen.PeerManager] Initial peer started: #{peer_node} (#{elapsed}ms)")
     cleanup_old_extract_dirs()
-    {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
+    {:ok, %{state | active_peer: peer_pid, active_node: peer_node, active_ref: ref}}
   end
 
   @impl true
@@ -297,6 +299,18 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{active_ref: ref} = state) do
+    # The active peer died unexpectedly. Crash so the supervisor (and ultimately
+    # pid1) restarts the entire machine — there's no traffic being served.
+    Logger.error(
+      "[BlueGreen.PeerManager] Active peer #{state.active_node} died: #{inspect(reason)}. " <>
+        "Crashing to trigger machine restart."
+    )
+
+    {:stop, {:peer_died, reason}, state}
   end
 
   @impl true
@@ -335,6 +349,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
               "[BlueGreen.PeerManager] Incoming peer #{peer_node} started (#{start_elapsed}ms)"
             )
 
+            # Swap monitors: stop watching the old peer, start watching the new one
+            Process.demonitor(state.active_ref, [:flush])
+            new_ref = Process.monitor(peer_pid)
+
             # New peer is fully started with Endpoint bound via reuseport.
             # The new peer was connected to the old peer BEFORE its sup tree
             # started (inside start_peer), so lock checks, DurableServer, etc. could
@@ -356,7 +374,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
                 "(start: #{start_elapsed}ms, shutdown: #{stop_elapsed}ms)"
             )
 
-            {:ok, %{state | active_peer: peer_pid, active_node: peer_node}}
+            {:ok, %{state | active_peer: peer_pid, active_node: peer_node, active_ref: new_ref}}
 
           {:error, reason} ->
             Logger.error("[BlueGreen.PeerManager] Peer start failed: #{inspect(reason)}")
