@@ -1,3 +1,8 @@
+## 0.3.2 (2026-02-27)
+
+### Bug Fixes
+- Fix failed peer start or peer nodedown failing to bring parent app down
+
 ## 0.3.1 (2026-02-27)
 
 ### Bug Fixes
