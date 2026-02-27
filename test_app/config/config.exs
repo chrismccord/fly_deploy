@@ -2,7 +2,7 @@ import Config
 
 config :test_app,
   generators: [timestamp_type: :utc_datetime],
-  compile_version: "v2"
+  compile_version: "v3"
 
 config :test_app, TestAppWeb.Endpoint,
   url: [host: "localhost"],
