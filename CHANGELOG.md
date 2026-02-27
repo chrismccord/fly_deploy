@@ -1,3 +1,14 @@
+## 0.3.0 (2026-02-27)
+
+### Enhancements
+- **Blue-green deploys via hot `:peer` nodes**: Boot your app in a child BEAM process and swap to a new one on upgrade. See `FlyDeploy.BlueGreen` for setup.
+- **`mix fly_deploy.blue_green`**: New mix task for blue-green deploys (equivalent to `mix fly_deploy.hot --mode blue_green`)
+- **Hot upgrades inside blue-green peers**: The peer runs its own `FlyDeploy.Poller` with `mode: :hot`, so you can apply hot code upgrades in-place inside a running peer
+- **Restart reapply**: On machine restart, both blue-green base and hot overlay are reapplied from S3 automatically
+- **`FlyDeploy.list_remote_peers/0`**: List peer nodes visible from the current node, filtering out parent nodes and remsh sessions
+- **`FlyDeploy.peer_node/0`**: Get the active peer's node name from the parent (useful for remsh)
+- **Configurable `shutdown_timeout`**: Control max time to wait for the outgoing peer to shut down before force-killing. `nil` (default) waits indefinitely.
+
 ## 0.2.5 (2026-01-29)
 - Log specific process info for processes timing out on suspend/resume
 
