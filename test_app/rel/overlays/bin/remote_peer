@@ -13,7 +13,16 @@ PEER_NODE=$(./test_app rpc 'IO.puts(FlyDeploy.BlueGreen.PeerManager.peer_node())
 RELEASE_ROOT="$(cd .. && pwd -P)"
 REL_VSN="$(cut -d' ' -f2 "$RELEASE_ROOT/releases/start_erl.data")"
 REL_VSN_DIR="$RELEASE_ROOT/releases/$REL_VSN"
-RELEASE_COOKIE="$(cat "$RELEASE_ROOT/releases/COOKIE")"
+
+# Source env.sh to get the runtime cookie and distribution flags.
+# The COOKIE file on disk may differ from the actual cookie when
+# RELEASE_COOKIE is set via env.sh (e.g., on Fly.io).
+. "$REL_VSN_DIR/env.sh"
+
+# Prefer RELEASE_COOKIE env var (set by env.sh), fall back to file
+if [ -z "${RELEASE_COOKIE:-}" ]; then
+  RELEASE_COOKIE="$(cat "$RELEASE_ROOT/releases/COOKIE")"
+fi
 
 # On Fly, use IPv6 distribution
 if [ -n "${FLY_PRIVATE_IP:-}" ]; then

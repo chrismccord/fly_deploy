@@ -1,3 +1,11 @@
+## 0.3.3 (2026-03-02)
+
+### Bug Fixes
+- Fix `SO_REUSEPORT` not being set on peer listeners, causing `eaddrinuse` on blue-green upgrades. The reuseport config was being wiped by `Application.load/1` because it was set without `persistent: true`.
+
+### Enhancements
+- Add `FlyDeploy.outgoing_peer/0` to get the outgoing peer node during blue-green upgrades, useful for handoff coordination
+
 ## 0.3.2 (2026-02-27)
 
 ### Bug Fixes

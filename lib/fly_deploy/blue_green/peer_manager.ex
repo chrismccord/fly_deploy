@@ -642,8 +642,9 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       load_release_config(node, vsn_dir)
     end
 
-    # Mark as peer so FlyDeploy.BlueGreen.start_link detects it
-    :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer])
+    # Mark as peer so FlyDeploy.BlueGreen.start_link detects it.
+    # persistent: true so it survives Application.load(:fly_deploy).
+    :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer, [persistent: true]])
 
     # Inject SO_REUSEPORT so both old and new peers can bind the same port
     # simultaneously during cutover, eliminating the brief gap where neither
@@ -664,6 +665,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     if active_node do
       :erpc.call(node, Node, :connect, [active_node], 5_000)
+
+      :erpc.call(node, Application, :put_env, [
+        :fly_deploy,
+        :__outgoing_peer__,
+        active_node,
+        [persistent: true]
+      ])
 
       Logger.info(
         "[BlueGreen.PeerManager] Connected incoming peer #{node} to outgoing peer #{active_node}"
@@ -850,7 +858,13 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       http_config = Keyword.put(http_config, :thousand_island_options, ti_opts)
       config = Keyword.put(config, :http, http_config)
 
-      Application.put_env(otp_app, endpoint, config)
+      # Must be persistent: true so the value survives Application.load/1.
+      # load_release_config sets endpoint config with persistent: true, then
+      # ensure_all_started calls Application.load which resets env to .app
+      # defaults + persistent overrides. Without persistent: true here, the
+      # reuseport config gets wiped by the persistent value from load_release_config
+      # (which doesn't include reuseport).
+      Application.put_env(otp_app, endpoint, config, persistent: true)
     end)
   rescue
     e ->

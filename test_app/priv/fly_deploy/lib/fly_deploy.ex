@@ -220,6 +220,28 @@ defmodule FlyDeploy do
   defdelegate current_vsn(), to: FlyDeploy.Poller
 
   @doc """
+  Returns the outgoing peer node that this peer is replacing, or `nil`.
+
+  Only meaningful during a blue-green upgrade — the incoming peer can call this
+  during its boot sequence to discover the outgoing peer for handoff coordination
+  (e.g., releasing a volume lock, draining connections, transferring state).
+
+  Returns `nil` on the initial boot (no outgoing peer) or if not running as a peer.
+
+  ## Example
+
+      # In your Application.start/2 or a GenServer init
+      case FlyDeploy.outgoing_peer() do
+        nil -> :ok
+        node -> :erpc.call(node, MyApp.Lock, :release, [])
+      end
+
+  """
+  def outgoing_peer do
+    Application.get_env(:fly_deploy, :__outgoing_peer__)
+  end
+
+  @doc """
   Returns a list of blue-green peer nodes visible to this node.
 
   Peer nodes are named with a `_peer_` segment (e.g., `my_app_peer_123@fd00::1`).
