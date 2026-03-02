@@ -390,6 +390,18 @@ defmodule FlyDeploy.Poller do
   end
 
   defp apply_upgrade(state, upgrade) do
+    # For blue-green mode, check if an upgrade is already in progress before
+    # blocking on the PeerManager GenServer call. This prevents queueing a
+    # second upgrade while the incoming/outgoing peers are still transitioning.
+    if state.mode == :blue_green and FlyDeploy.BlueGreen.PeerManager.upgrading?() do
+      Logger.info("[FlyDeploy.Poller] Blue-green upgrade already in progress, skipping")
+      state
+    else
+      do_apply_upgrade(state, upgrade)
+    end
+  end
+
+  defp do_apply_upgrade(state, upgrade) do
     # Define these first so they're available in rescue block
     start_time = System.monotonic_time(:millisecond)
     source_image_ref = upgrade["source_image_ref"]
