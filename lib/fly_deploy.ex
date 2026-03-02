@@ -233,7 +233,7 @@ defmodule FlyDeploy do
 
   ## Example
 
-      FlyDeploy.blue_green_cluster_status(:sprites)
+      FlyDeploy.blue_green_cluster_status()
       #=> [
       #     %{machine_id: "28715e9ad771", region: "iad", parent: ..., active_peer: ...,
       #       active_peer_alive: true, peer_connected: true, upgrading: false},
@@ -242,7 +242,7 @@ defmodule FlyDeploy do
       #   ]
 
   """
-  def blue_green_cluster_status(_otp_app) do
+  def blue_green_cluster_status do
     visible_nodes = MapSet.new(Node.list())
 
     # Find all parent nodes (named fly_deploy_parent_*)

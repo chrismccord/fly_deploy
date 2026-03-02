@@ -31,7 +31,10 @@ defmodule FlyDeploy.Orchestrator do
 
     # get config values from environment variables (passed from Mix task)
     version = System.get_env("DEPLOY_VERSION")
-    timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", "120000"))
+    mode = System.get_env("DEPLOY_MODE", "hot")
+
+    default_timeout = if mode == "blue_green", do: "600000", else: "120000"
+    timeout = String.to_integer(System.get_env("DEPLOY_TIMEOUT", default_timeout))
 
     # track start time
     start_time = System.monotonic_time(:millisecond)

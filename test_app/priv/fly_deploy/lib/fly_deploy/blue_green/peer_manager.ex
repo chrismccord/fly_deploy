@@ -298,7 +298,26 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     {:ok, %{state | active_peer: peer_pid, active_node: peer_node, active_ref: ref}}
   end
 
+  @doc """
+  Returns a status map for this machine's blue-green state.
+  """
+  def get_info do
+    GenServer.call(__MODULE__, :get_info, 5_000)
+  end
+
   @impl true
+  def handle_call(:get_info, _from, state) do
+    info = %{
+      active_node: state.active_node,
+      active_peer_alive: is_pid(state.active_peer) and Process.alive?(state.active_peer),
+      upgrading: upgrading?(),
+      machine_id: System.get_env("FLY_MACHINE_ID"),
+      region: System.get_env("FLY_REGION")
+    }
+
+    {:reply, info, state}
+  end
+
   def handle_call(:peer_node, _from, state) do
     {:reply, state.active_node, state}
   end
