@@ -240,9 +240,21 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   Called by the Poller when it detects a new release in S3.
   Downloads the tarball, extracts it, and starts a new peer with the new code.
+
+  Returns `{:error, :upgrade_in_progress}` if an upgrade is already running.
   """
   def upgrade(tarball_url) do
     GenServer.call(__MODULE__, {:upgrade, tarball_url}, :infinity)
+  end
+
+  @doc """
+  Returns true if a blue-green upgrade is currently in progress.
+
+  Uses `:persistent_term` so it's readable from any process without
+  blocking on the PeerManager GenServer (which is busy doing the upgrade).
+  """
+  def upgrading? do
+    :persistent_term.get({__MODULE__, :upgrading}, false)
   end
 
   @doc """
@@ -291,6 +303,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     {:reply, state.active_node, state}
   end
 
+  def handle_call({:upgrade, _tarball_url}, _from, state) when state.upgrading_peer != nil do
+    Logger.warning(
+      "[BlueGreen.PeerManager] Refusing upgrade - upgrade already in progress " <>
+        "(upgrading peer: #{inspect(state.upgrading_node)})"
+    )
+
+    {:reply, {:error, :upgrade_in_progress}, state}
+  end
+
   def handle_call({:upgrade, tarball_url}, _from, state) do
     case do_upgrade(tarball_url, state) do
       {:ok, new_state} ->
@@ -330,7 +351,16 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   defp do_upgrade(tarball_url, state) do
     Logger.info("[BlueGreen.PeerManager] Starting blue-green upgrade...")
+    :persistent_term.put({__MODULE__, :upgrading}, true)
 
+    try do
+      do_upgrade_inner(tarball_url, state)
+    after
+      :persistent_term.put({__MODULE__, :upgrading}, false)
+    end
+  end
+
+  defp do_upgrade_inner(tarball_url, state) do
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
         start_time = System.monotonic_time(:millisecond)
