@@ -196,6 +196,97 @@ defmodule FlyDeploy do
   defdelegate peer_node(), to: FlyDeploy.BlueGreen.PeerManager
 
   @doc """
+  Returns the cluster-wide blue-green deployment status.
+
+  Queries every reachable parent node's PeerManager for its state, and checks
+  peer connectivity from the caller's perspective. Callable from any node
+  (parent or peer).
+
+  ## Return Value
+
+  A list of machine status maps:
+
+      [
+        %{
+          machine_id: "abc123def456",
+          region: "iad",
+          parent: :"fly_deploy_parent_123@fd00::1",
+          active_peer: :"sprites_peer_abc123_1@fd00::1",
+          active_peer_alive: true,
+          peer_connected: true,
+          upgrading: false
+        },
+        ...
+      ]
+
+  Fields:
+
+  - `:machine_id` - Fly machine ID
+  - `:region` - Fly region code
+  - `:parent` - Parent node name on this machine
+  - `:active_peer` - The currently active peer node name
+  - `:active_peer_alive` - Whether the peer OS process is alive (from parent's view)
+  - `:peer_connected` - Whether the active peer is reachable from the caller
+  - `:upgrading` - Whether a blue-green upgrade is in progress on this machine
+
+  If a parent is unreachable, returns `%{parent: node, error: :unreachable}`.
+
+  ## Example
+
+      FlyDeploy.blue_green_cluster_status(:sprites)
+      #=> [
+      #     %{machine_id: "28715e9ad771", region: "iad", parent: ..., active_peer: ...,
+      #       active_peer_alive: true, peer_connected: true, upgrading: false},
+      #     %{machine_id: "d8de3d0b2d91", region: "ord", parent: ..., active_peer: ...,
+      #       active_peer_alive: true, peer_connected: true, upgrading: false}
+      #   ]
+
+  """
+  def blue_green_cluster_status(_otp_app) do
+    visible_nodes = MapSet.new(Node.list())
+
+    # Find all parent nodes (named fly_deploy_parent_*)
+    parents =
+      Node.list()
+      |> Enum.filter(fn n ->
+        n |> Atom.to_string() |> String.starts_with?("fly_deploy_parent_")
+      end)
+
+    # Include local node if it's a parent
+    parents =
+      if Node.self() |> Atom.to_string() |> String.starts_with?("fly_deploy_parent_") do
+        [Node.self() | parents]
+      else
+        parents
+      end
+
+    parents
+    |> Task.async_stream(
+      fn parent ->
+        try do
+          info = :erpc.call(parent, FlyDeploy.BlueGreen.PeerManager, :get_info, [], 5_000)
+
+          %{
+            machine_id: info.machine_id,
+            region: info.region,
+            parent: parent,
+            active_peer: info.active_node,
+            active_peer_alive: info.active_peer_alive,
+            peer_connected: MapSet.member?(visible_nodes, info.active_node),
+            upgrading: info.upgrading
+          }
+        catch
+          _, _ -> %{parent: parent, error: :unreachable}
+        end
+      end,
+      max_concurrency: 20,
+      timeout: 10_000
+    )
+    |> Enum.map(fn {:ok, result} -> result end)
+    |> Enum.sort_by(& &1[:region])
+  end
+
+  @doc """
   Returns the current code version fingerprint.
 
   The fingerprint is a map containing:

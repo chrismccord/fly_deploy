@@ -1,3 +1,10 @@
+## 0.3.4 (2026-03-02)
+
+### Enhancements
+- Protection against concurrent bg deploys
+- Add `FlyDeploy.blue_green_cluster_status(otp_app)`
+- Fix early timeout errors being display on bluegreen deploys
+
 ## 0.3.3 (2026-03-02)
 
 ### Bug Fixes
