@@ -1,3 +1,8 @@
+## 0.3.7 (2026-03-03)
+
+### Enhancements
+- Simplify BlueGreen startup
+
 ## 0.3.6 (2026-03-03)
 
 ### Enhancements

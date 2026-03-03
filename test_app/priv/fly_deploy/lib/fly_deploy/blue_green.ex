@@ -107,9 +107,6 @@ defmodule FlyDeploy.BlueGreen do
   defp start_as_parent(otp_app, children, opts) do
     Logger.info("[BlueGreen] Starting as parent for #{otp_app}")
 
-    # Start distributed Erlang if not already started
-    ensure_distributed()
-
     FlyDeploy.BlueGreen.Supervisor.start_link(
       otp_app: otp_app,
       children: children,
@@ -117,19 +114,5 @@ defmodule FlyDeploy.BlueGreen do
       poll_interval: Keyword.get(opts, :poll_interval, 1_000),
       shutdown_timeout: Keyword.get(opts, :shutdown_timeout)
     )
-  end
-
-  defp ensure_distributed do
-    if Node.alive?() do
-      :ok
-    else
-      # On Fly.io, we need long names with the machine's IPv6 address.
-      # ERL_AFLAGS="-proto_dist inet6_tcp" is already set at VM startup by env.sh,
-      # so Node.start will use IPv6 distribution automatically.
-      ip = System.get_env("FLY_PRIVATE_IP", "127.0.0.1")
-      node_name = :"fly_deploy_parent_#{System.pid()}@#{ip}"
-      {:ok, _} = :net_kernel.start(node_name, %{name_domain: :longnames})
-      :ok
-    end
   end
 end
