@@ -1,3 +1,8 @@
+## 0.3.8 (2026-03-03)
+
+### Bug Fixes
+- Fix `runtime.exs` `config_env()` returning `:prod` instead of the actual MIX_ENV (e.g., `:staging`) in blue-green peers
+
 ## 0.3.7 (2026-03-03)
 
 ### Enhancements

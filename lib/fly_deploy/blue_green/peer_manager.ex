@@ -802,7 +802,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         stripped =
           Enum.map(configs, fn
             {app, kvs} when is_atom(app) and is_list(kvs) ->
-              {app, Keyword.delete(kvs, :config_providers)}
+              {app,
+               kvs |> Keyword.delete(:config_providers) |> Keyword.delete(:config_provider_init)}
 
             other ->
               other
@@ -937,26 +938,37 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     :erpc.call(node, fn ->
       # Step 1: Load compile-time config from sys.config
       sys_config_path = Path.join(vsn_dir, "sys.config")
+      config_env = :prod
 
-      if File.exists?(sys_config_path) do
-        case :file.consult(String.to_charlist(sys_config_path)) do
-          {:ok, [configs]} when is_list(configs) ->
-            for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
-              for {key, val} <- kvs, key != :config_providers do
-                Application.put_env(app, key, val, persistent: true)
+      config_env =
+        if File.exists?(sys_config_path) do
+          case :file.consult(String.to_charlist(sys_config_path)) do
+            {:ok, [configs]} when is_list(configs) ->
+              for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
+                for {key, val} <- kvs, key not in [:config_providers, :config_provider_init] do
+                  Application.put_env(app, key, val, persistent: true)
+                end
               end
-            end
 
-            Logger.info(
-              "[BlueGreen.PeerManager] Loaded compile-time config from #{sys_config_path}"
-            )
+              Logger.info(
+                "[BlueGreen.PeerManager] Loaded compile-time config from #{sys_config_path}"
+              )
 
-          other ->
-            Logger.warning(
-              "[BlueGreen.PeerManager] Could not parse sys.config: #{inspect(other)}"
-            )
+              # Extract the config env from the config_providers entry.
+              # Elixir stores it as:
+              #   {elixir, [{config_providers, [{Config.Provider.Elixir, {path, [env: :staging]}}]}]}
+              extract_config_env(configs) || config_env
+
+            other ->
+              Logger.warning(
+                "[BlueGreen.PeerManager] Could not parse sys.config: #{inspect(other)}"
+              )
+
+              config_env
+          end
+        else
+          config_env
         end
-      end
 
       # Step 2: Load runtime config from runtime.exs
       # Deep-merge runtime values on top of compile-time values, matching the
@@ -966,7 +978,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       runtime_path = Path.join(vsn_dir, "runtime.exs")
 
       if File.exists?(runtime_path) do
-        configs = Config.Reader.read!(runtime_path, env: :prod)
+        configs = Config.Reader.read!(runtime_path, env: config_env)
 
         # Deep merge that recurses into nested keyword lists but replaces
         # plain lists and non-list values — same as Config.__merge__/2.
@@ -999,6 +1011,24 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       Logger.warning(
         "[BlueGreen.PeerManager] Failed to load release config: #{Exception.message(e)}"
       )
+  end
+
+  # Extracts the MIX_ENV used to build the release from the config_provider_init
+  # entry in sys.config. Elixir's release system stores this as:
+  #   {elixir, [config_provider_init: %Config.Provider{
+  #     providers: [{Config.Reader, {path, [env: :staging, ...]}}]
+  #   }]}
+  # Returns the env atom (e.g., :prod, :staging) or nil if not found.
+  defp extract_config_env(configs) do
+    with {:ok, elixir_kvs} <- Keyword.fetch(configs, :elixir),
+         {:ok, %{providers: [_ | _] = providers}} <-
+           Keyword.fetch(elixir_kvs, :config_provider_init),
+         {Config.Reader, {_path, provider_opts}} <- List.first(providers),
+         {:ok, env} <- Keyword.fetch(provider_opts, :env) do
+      env
+    else
+      _ -> nil
+    end
   end
 
   # -- Startup reapply -------------------------------------------------------

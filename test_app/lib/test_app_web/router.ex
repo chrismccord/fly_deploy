@@ -11,6 +11,7 @@ defmodule TestAppWeb.Router do
 
     get "/health", HealthController, :show
     post "/counter/increment", CounterController, :increment
+    get "/new-feature", NewFeatureController, :show
   end
 
   scope "/", TestAppWeb do
