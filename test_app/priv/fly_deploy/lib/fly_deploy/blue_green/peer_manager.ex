@@ -802,7 +802,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         stripped =
           Enum.map(configs, fn
             {app, kvs} when is_atom(app) and is_list(kvs) ->
-              {app, kvs |> Keyword.delete(:config_providers) |> Keyword.delete(:config_provider_init)}
+              {app,
+               kvs |> Keyword.delete(:config_providers) |> Keyword.delete(:config_provider_init)}
 
             other ->
               other
