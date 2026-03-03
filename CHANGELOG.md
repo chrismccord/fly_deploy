@@ -1,3 +1,8 @@
+## 0.3.6 (2026-03-03)
+
+### Enhancements
+- Add parent-level children to `FlyDeploy.BlueGreen.start_link/2` for cross-machine mesh formation. Pass children like `DNSCluster` to run on the parent node, which has a consistent basename for DNS discovery. Peers mesh transitively through the parent backbone via `global` auto-connect.
+
 ## 0.3.5 (2026-03-02)
 
 ### Bug Fixes

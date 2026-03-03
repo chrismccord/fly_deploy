@@ -8,6 +8,9 @@ defmodule TestApp.Application do
     case System.get_env("FLY_DEPLOY_MODE") do
       "blue_green" ->
         FlyDeploy.BlueGreen.start_link(
+          [
+            {DNSCluster, query: Application.get_env(:test_app, :dns_cluster_query) || :ignore}
+          ],
           otp_app: :test_app,
           start: {__MODULE__, :start_app, [type, args]},
           endpoint: TestAppWeb.Endpoint

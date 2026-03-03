@@ -15,6 +15,9 @@ defmodule FlyDeploy.BlueGreen do
 
         def start(type, args) do
           FlyDeploy.BlueGreen.start_link(
+            [
+              {DNSCluster, query: Application.get_env(:my_app, :dns_cluster_query) || :ignore}
+            ],
             otp_app: :my_app,
             start: {__MODULE__, :start_app, [type, args]}
           )
@@ -30,6 +33,12 @@ defmodule FlyDeploy.BlueGreen do
           Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
         end
       end
+
+  The first argument is a list of child specs to run on the **parent** node.
+  This is important for children like `DNSCluster` that rely on a consistent
+  node basename for discovery — peer nodes have machine-specific names that
+  prevent cross-machine discovery, but parent nodes share a consistent basename
+  set by `RELEASE_NODE`.
 
   ## How it works
 
@@ -52,11 +61,28 @@ defmodule FlyDeploy.BlueGreen do
   require Logger
 
   @doc """
-  Entry point for blue-green mode. Call this from `Application.start/2`.
+  Entry point for blue-green mode with parent-level children.
+
+  The first argument is a list of child specs to supervise on the parent node.
+  These start before PeerManager and Poller, making them ideal for clustering
+  (e.g., `DNSCluster`) that needs the parent's consistent node basename.
 
   See module docs for setup instructions.
   """
-  def start_link(opts) do
+  def start_link(children, opts) when is_list(children) do
+    do_start_link(children, opts)
+  end
+
+  @doc """
+  Entry point for blue-green mode without parent-level children.
+
+  See `start_link/2` for the variant that accepts parent children.
+  """
+  def start_link(opts) when is_list(opts) do
+    do_start_link([], opts)
+  end
+
+  defp do_start_link(children, opts) do
     {mod, fun, args} = Keyword.fetch!(opts, :start)
     otp_app = Keyword.fetch!(opts, :otp_app)
 
@@ -64,21 +90,21 @@ defmodule FlyDeploy.BlueGreen do
       # Parent already told us we're a peer — just run the user's app
       apply(mod, fun, args)
     else
-      maybe_start_parent(otp_app, mod, fun, args, opts)
+      maybe_start_parent(otp_app, mod, fun, args, children, opts)
     end
   end
 
-  defp maybe_start_parent(otp_app, mod, fun, args, opts) do
+  defp maybe_start_parent(otp_app, mod, fun, args, children, opts) do
     if System.get_env("FLY_IMAGE_REF") do
       # We're on Fly — become the parent, boot app in a peer
-      start_as_parent(otp_app, opts)
+      start_as_parent(otp_app, children, opts)
     else
       # Dev/test — just run normally, no peers
       apply(mod, fun, args)
     end
   end
 
-  defp start_as_parent(otp_app, opts) do
+  defp start_as_parent(otp_app, children, opts) do
     Logger.info("[BlueGreen] Starting as parent for #{otp_app}")
 
     # Start distributed Erlang if not already started
@@ -86,6 +112,7 @@ defmodule FlyDeploy.BlueGreen do
 
     FlyDeploy.BlueGreen.Supervisor.start_link(
       otp_app: otp_app,
+      children: children,
       endpoint: Keyword.get(opts, :endpoint),
       poll_interval: Keyword.get(opts, :poll_interval, 1_000),
       shutdown_timeout: Keyword.get(opts, :shutdown_timeout)
