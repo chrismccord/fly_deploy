@@ -104,6 +104,7 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     write_health_controller("v1")
     write_counter_module("v1")
     write_compile_config("v1")
+    write_prod_config("v1")
     write_runtime_config("v1")
     write_mix_deps("v1")
     write_priv_file("v1")
@@ -122,6 +123,13 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     assert before_upgrade["counter"]["version"] == "v1"
     assert before_upgrade["compile_config"] == "v1", "Compile-time config should be v1"
     assert before_upgrade["runtime_config"] == "v1", "Runtime config should be v1"
+
+    assert before_upgrade["prod_override_scalar"] == "from-runtime",
+           "runtime.exs should override prod.exs scalar in v1 cold deploy. Got: #{inspect(before_upgrade["prod_override_scalar"])}"
+
+    assert before_upgrade["prod_override_list"] == ["runtime.example.com"],
+           "runtime.exs should override prod.exs plain list in v1 cold deploy. Got: #{inspect(before_upgrade["prod_override_list"])}"
+
     assert before_upgrade["new_dep_loaded"] == false, "nimble_csv should NOT be loaded in v1"
     assert is_nil(before_upgrade["nif_result"]), "bcrypt NIF should NOT be available in v1"
     assert before_upgrade["priv_file"] == "priv-v1", "Priv file should be v1"
@@ -138,6 +146,7 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     write_health_controller("v2")
     write_counter_module("v2")
     write_compile_config("v2")
+    write_prod_config("v2")
     write_runtime_config("v2")
     write_mix_deps("v2")
     write_priv_file("v2")
@@ -173,6 +182,15 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
     assert after_upgrade["runtime_config"] == "v2",
            "Runtime config should be v2 (new runtime.exs evaluated at peer boot)"
+
+    # Verify runtime.exs overrides prod.exs in the blue-green peer.
+    # This tests the deep-merge fix in load_release_config — without it,
+    # plain lists crash Keyword.merge and scalar values from prod.exs leak through.
+    assert after_upgrade["prod_override_scalar"] == "from-runtime",
+           "runtime.exs must override prod.exs scalar after blue-green deploy. Got: #{inspect(after_upgrade["prod_override_scalar"])}"
+
+    assert after_upgrade["prod_override_list"] == ["runtime.example.com"],
+           "runtime.exs must override prod.exs plain list after blue-green deploy. Got: #{inspect(after_upgrade["prod_override_list"])}"
 
     # New dep should be available in the peer
     assert after_upgrade["new_dep_loaded"] == true,
@@ -269,6 +287,12 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     assert after_restart["runtime_config"] == "v2",
            "Runtime config should be v2 after restart (from blue-green tarball)"
 
+    assert after_restart["prod_override_scalar"] == "from-runtime",
+           "runtime.exs must override prod.exs scalar after restart. Got: #{inspect(after_restart["prod_override_scalar"])}"
+
+    assert after_restart["prod_override_list"] == ["runtime.example.com"],
+           "runtime.exs must override prod.exs plain list after restart. Got: #{inspect(after_restart["prod_override_list"])}"
+
     assert after_restart["new_dep_loaded"] == true,
            "nimble_csv should be loaded after restart (blue-green tarball has all deps)"
 
@@ -301,6 +325,7 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     write_health_controller("v3")
     write_counter_module("v3")
     write_compile_config("v3")
+    write_prod_config("v3")
     write_runtime_config("v3")
     write_mix_deps("v3")
     write_priv_file("v3")
@@ -364,6 +389,8 @@ defmodule FlyDeploy.BlueGreenE2ETest do
           fly_deploy_vsn: fly_deploy_vsn,
           compile_config: Application.get_env(:test_app, :compile_version),
           runtime_config: Application.get_env(:test_app, :runtime_version),
+          prod_override_scalar: Application.get_env(:test_app, :prod_override_scalar),
+          prod_override_list: Application.get_env(:test_app, :prod_override_list),
           new_dep_loaded: Code.ensure_loaded?(NimbleCSV),
           nif_result: nif_result,
           priv_file: priv_content,
@@ -517,6 +544,35 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     IO.puts("  Updated compile config to #{version}")
   end
 
+  defp write_prod_config(_version) do
+    prod_path = Path.join(@test_app_dir, "config/prod.exs")
+
+    content = """
+    import Config
+
+    # Do not print debug messages in production
+    config :logger, level: :info
+
+    # Configure static asset serving with cache manifest
+    config :test_app, TestAppWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
+
+    # -- Config override tests -------------------------------------------------
+    # These values are set here in prod.exs and ALSO set in runtime.exs.
+    # After blue-green deploy, the runtime.exs values must win. This tests that
+    # load_release_config deep-merges correctly:
+    #
+    # Scalar: simple replace (runtime.exs value should replace prod.exs value)
+    config :test_app, :prod_override_scalar, "from-prod"
+    #
+    # Plain list: NOT a keyword list — must not be passed to Keyword.merge
+    # (which crashes on plain lists), must be replaced entirely.
+    config :test_app, :prod_override_list, ["prod.example.com"]
+    """
+
+    File.write!(prod_path, content)
+    IO.puts("  Updated prod config")
+  end
+
   defp write_runtime_config(version) do
     runtime_path = Path.join(@test_app_dir, "config/runtime.exs")
 
@@ -539,6 +595,15 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
       # Runtime config version — evaluated fresh at each boot
       config :test_app, :runtime_version, #{inspect(version)}
+
+      # -- Config override tests -----------------------------------------------
+      # These MUST override the values set in prod.exs. After blue-green deploy,
+      # load_release_config must deep-merge runtime.exs on top of sys.config
+      # (which contains prod.exs values). If the merge is broken (e.g., crashes
+      # on plain lists), these runtime values won't be applied and the prod.exs
+      # values will leak through.
+      config :test_app, :prod_override_scalar, "from-runtime"
+      config :test_app, :prod_override_list, ["runtime.example.com"]
 
       config :test_app, TestAppWeb.Endpoint,
         url: [host: host, port: 443, scheme: "https"],

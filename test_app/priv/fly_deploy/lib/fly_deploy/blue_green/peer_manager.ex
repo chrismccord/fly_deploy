@@ -959,19 +959,31 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
       end
 
       # Step 2: Load runtime config from runtime.exs
-      # Runtime values are MERGED on top of compile-time values (Keyword.merge),
-      # not replaced. This preserves compile-time keys that runtime.exs doesn't
-      # re-set (e.g., adapter: Bandit.PhoenixAdapter in the endpoint config).
+      # Deep-merge runtime values on top of compile-time values, matching the
+      # semantics of Elixir's Config system (Config.__merge__). This correctly
+      # handles nested keyword lists (e.g., endpoint url/http config) and plain
+      # lists (e.g., check_origin) without crashing.
       runtime_path = Path.join(vsn_dir, "runtime.exs")
 
       if File.exists?(runtime_path) do
         configs = Config.Reader.read!(runtime_path, env: :prod)
 
+        # Deep merge that recurses into nested keyword lists but replaces
+        # plain lists and non-list values — same as Config.__merge__/2.
+        deep_merge = fn deep_merge, v1, v2 ->
+          if Keyword.keyword?(v1) and Keyword.keyword?(v2) do
+            Keyword.merge(v1, v2, fn _k, a, b -> deep_merge.(deep_merge, a, b) end)
+          else
+            v2
+          end
+        end
+
         for {app, kvs} <- configs do
           for {key, val} <- kvs do
-            case {Application.fetch_env(app, key), val} do
-              {{:ok, existing}, val} when is_list(existing) and is_list(val) ->
-                Application.put_env(app, key, Keyword.merge(existing, val), persistent: true)
+            case Application.fetch_env(app, key) do
+              {:ok, existing} when is_list(existing) and is_list(val) ->
+                merged = deep_merge.(deep_merge, existing, val)
+                Application.put_env(app, key, merged, persistent: true)
 
               _ ->
                 Application.put_env(app, key, val, persistent: true)

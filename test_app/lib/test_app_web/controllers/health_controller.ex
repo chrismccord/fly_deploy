@@ -29,6 +29,8 @@ defmodule TestAppWeb.HealthController do
       fly_deploy_vsn: fly_deploy_vsn,
       compile_config: Application.get_env(:test_app, :compile_version),
       runtime_config: Application.get_env(:test_app, :runtime_version),
+      prod_override_scalar: Application.get_env(:test_app, :prod_override_scalar),
+      prod_override_list: Application.get_env(:test_app, :prod_override_list),
       new_dep_loaded: Code.ensure_loaded?(NimbleCSV),
       nif_result: nif_result,
       priv_file: priv_content,

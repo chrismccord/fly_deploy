@@ -17,6 +17,15 @@ if config_env() == :prod do
   # Runtime config version — evaluated fresh at each boot
   config :test_app, :runtime_version, "v3"
 
+  # -- Config override tests -----------------------------------------------
+  # These MUST override the values set in prod.exs. After blue-green deploy,
+  # load_release_config must deep-merge runtime.exs on top of sys.config
+  # (which contains prod.exs values). If the merge is broken (e.g., crashes
+  # on plain lists), these runtime values won't be applied and the prod.exs
+  # values will leak through.
+  config :test_app, :prod_override_scalar, "from-runtime"
+  config :test_app, :prod_override_list, ["runtime.example.com"]
+
   config :test_app, TestAppWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

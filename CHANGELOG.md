@@ -1,3 +1,11 @@
+## 0.3.5 (2026-03-02)
+
+### Bug Fixes
+- Fix `runtime.exs` config not overriding `prod.exs` values after blue-green deploy. `load_release_config` was using `Keyword.merge` which crashes on plain lists (e.g., `check_origin`) and only does a shallow merge. Now uses a deep merge matching Elixir's `Config.__merge__` semantics.
+
+### Enhancements
+- Increase default deploy timeout for blue-green mode from 60s to 10 minutes
+
 ## 0.3.4 (2026-03-02)
 
 ### Enhancements
