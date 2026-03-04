@@ -18,12 +18,19 @@ defmodule FlyDeploy.BlueGreen.Supervisor do
     endpoint = Keyword.get(opts, :endpoint)
     poll_interval = Keyword.get(opts, :poll_interval, 1_000)
     shutdown_timeout = Keyword.get(opts, :shutdown_timeout)
+    before_cutover = Keyword.get(opts, :before_cutover)
+    after_cutover = Keyword.get(opts, :after_cutover)
 
     children =
       parent_children ++
         [
+          {Task.Supervisor, name: FlyDeploy.BlueGreen.TaskSupervisor},
           {FlyDeploy.BlueGreen.PeerManager,
-           otp_app: otp_app, endpoint: endpoint, shutdown_timeout: shutdown_timeout},
+           otp_app: otp_app,
+           endpoint: endpoint,
+           shutdown_timeout: shutdown_timeout,
+           before_cutover: before_cutover,
+           after_cutover: after_cutover},
           {FlyDeploy.Poller, otp_app: otp_app, poll_interval: poll_interval, mode: :blue_green}
         ]
 

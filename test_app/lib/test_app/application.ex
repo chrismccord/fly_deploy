@@ -13,7 +13,9 @@ defmodule TestApp.Application do
           ],
           otp_app: :test_app,
           start: {__MODULE__, :start_app, [type, args]},
-          endpoint: TestAppWeb.Endpoint
+          endpoint: TestAppWeb.Endpoint,
+          before_cutover: {TestApp.Cutover, :before_cutover, []},
+          after_cutover: {TestApp.Cutover, :after_cutover, []}
         )
 
       _ ->

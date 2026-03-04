@@ -482,6 +482,10 @@ defmodule FlyDeploy.Upgrader do
       "  ✓ Loaded #{length(modified_modules)} modified modules: #{inspect(modified_modules)}"
     )
 
+    # Consolidated protocols may not show up in :code.modified_modules/0,
+    # so reload them explicitly (same as the live upgrade path)
+    reload_consolidated_protocols()
+
     IO.puts("✅ Startup hot upgrade replay complete!")
 
     # Clean up temp files

@@ -130,6 +130,9 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     assert before_upgrade["prod_override_list"] == ["runtime.example.com"],
            "runtime.exs should override prod.exs plain list in v1 cold deploy. Got: #{inspect(before_upgrade["prod_override_list"])}"
 
+    assert before_upgrade["cutover_handoff"] == nil,
+           "No cutover handoff on initial deploy (no outgoing peer)"
+
     assert before_upgrade["new_dep_loaded"] == false, "nimble_csv should NOT be loaded in v1"
     assert is_nil(before_upgrade["nif_result"]), "bcrypt NIF should NOT be available in v1"
     assert before_upgrade["priv_file"] == "priv-v1", "Priv file should be v1"
@@ -213,7 +216,29 @@ defmodule FlyDeploy.BlueGreenE2ETest do
       "  Counter after upgrade: count=#{after_upgrade["counter"]["count"]}, version=#{after_upgrade["counter"]["version"]}, pid=#{after_pid}"
     )
 
-    IO.puts("✓ Blue-green upgrade successful - v2 running, fresh state, new PID\n")
+    # Verify cutover handoff state was passed from outgoing → incoming peer
+    handoff = after_upgrade["cutover_handoff"]
+
+    assert handoff != nil,
+           "Cutover handoff state should be present (before_cutover → after_cutover)"
+
+    assert handoff["outgoing_counter"] == 5,
+           "before_cutover should have captured counter=5 from outgoing peer. Got: #{inspect(handoff["outgoing_counter"])}"
+
+    assert is_binary(handoff["outgoing_node"]),
+           "before_cutover should have captured outgoing node name"
+
+    # Verify after_cutover ran and wrote its own key via put_handoff
+    assert after_upgrade["after_cutover_ran"] == true,
+           "after_cutover should have written :test_app_after_cutover_ran via put_handoff"
+
+    IO.puts(
+      "  Cutover handoff: outgoing_counter=#{handoff["outgoing_counter"]}, outgoing_node=#{handoff["outgoing_node"]}, after_cutover_ran=#{after_upgrade["after_cutover_ran"]}"
+    )
+
+    IO.puts(
+      "✓ Blue-green upgrade successful - v2 running, fresh state, new PID, handoff verified\n"
+    )
 
     # Step 4a: Verify static assets were updated
     IO.puts("Step 4a: Verifying static assets were updated...")
@@ -394,6 +419,8 @@ defmodule FlyDeploy.BlueGreenE2ETest do
           new_dep_loaded: Code.ensure_loaded?(NimbleCSV),
           nif_result: nif_result,
           priv_file: priv_content,
+          cutover_handoff: TestApp.Cutover.get_handoff_state(),
+          after_cutover_ran: FlyDeploy.BlueGreen.get_handoff(:test_app_after_cutover_ran),
           counter: %{
             count: counter_info.count,
             version: counter_info.version,
@@ -466,6 +493,7 @@ defmodule FlyDeploy.BlueGreenE2ETest do
 
       @impl true
       def init(_opts) do
+        Process.flag(:trap_exit, true)
         {:ok, %State{count: 0, version: @counter_vsn, protocol_version: #{inspect(version)}}}
       end
 
@@ -490,6 +518,12 @@ defmodule FlyDeploy.BlueGreenE2ETest do
           string_representation: to_string(state),
           protocol_consolidated: Protocol.consolidated?(String.Chars)
         }, state}
+      end
+
+      @impl true
+      def terminate(_reason, state) do
+        FlyDeploy.BlueGreen.put_handoff(:counter_state, state.count)
+        :ok
       end
 
       @impl true

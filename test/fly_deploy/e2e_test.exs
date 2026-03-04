@@ -110,7 +110,7 @@ defmodule FlyDeploy.E2ETest do
     machines = Jason.decode!(elem(machines_output, 0))
     machine_id = hd(machines)["id"]
 
-    {pre_check, _} =
+    {pre_check, pre_exit} =
       System.cmd(
         "fly",
         [
@@ -123,8 +123,11 @@ defmodule FlyDeploy.E2ETest do
           "-C",
           "/app/bin/test_app eval 'md5 = :crypto.hash(:md5, File.read!(\"/app/releases/0.1.0/consolidated/Elixir.String.Chars.beam\")) |> Base.encode16(); IO.puts(Jason.encode!(%{md5: md5}))'"
         ],
-        cd: @test_app_dir
+        cd: @test_app_dir,
+        stderr_to_stdout: true
       )
+
+    IO.puts("  [debug] pre_check exit=#{pre_exit} output=#{inspect(String.trim(pre_check))}")
 
     pre_json = pre_check |> String.split("\n") |> Enum.find("", &String.starts_with?(&1, "{"))
     pre_md5_info = Jason.decode!(pre_json)
@@ -205,7 +208,7 @@ defmodule FlyDeploy.E2ETest do
     # If consolidated protocols aren't being copied, the MD5 would stay the same
     IO.puts("Step 4b: Verifying consolidated protocol beam file was updated...")
 
-    {post_check, _} =
+    {post_check, post_exit} =
       System.cmd(
         "fly",
         [
@@ -218,8 +221,11 @@ defmodule FlyDeploy.E2ETest do
           "-C",
           "/app/bin/test_app eval 'md5 = :crypto.hash(:md5, File.read!(\"/app/releases/0.1.0/consolidated/Elixir.String.Chars.beam\")) |> Base.encode16(); IO.puts(Jason.encode!(%{md5: md5}))'"
         ],
-        cd: @test_app_dir
+        cd: @test_app_dir,
+        stderr_to_stdout: true
       )
+
+    IO.puts("  [debug] post_check exit=#{post_exit} output=#{inspect(String.trim(post_check))}")
 
     post_json = post_check |> String.split("\n") |> Enum.find("", &String.starts_with?(&1, "{"))
     post_md5_info = Jason.decode!(post_json)

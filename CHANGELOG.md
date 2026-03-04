@@ -1,3 +1,13 @@
+## 0.3.9 (2026-03-04)
+
+### Bug Fixes
+- Fix `eaddrinuse` on blue-green deploys caused by `:badfun` when `inject_reuseport` and `load_release_config` used anonymous functions in `:erpc.call`. Anonymous functions carry module version hashes that don't match when fly_deploy is upgraded between deploys. Converted to named MFA calls.
+- Fix `:badarg` failures when hot deploying minor `fly_deploy` version changes caused by anon functions
+  cross the :erpc fence. Fixed by using MFA's instead.
+
+### Enhancements
+- Add `before_cutover` / `after_cutover` MFA callbacks for blue-green deploys. `before_cutover` runs on the outgoing peer and returns handoff state; `after_cutover` runs on the incoming peer and receives it.
+
 ## 0.3.8 (2026-03-03)
 
 ### Bug Fixes

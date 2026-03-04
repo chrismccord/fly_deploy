@@ -211,6 +211,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     :otp_app,
     :endpoint,
     :shutdown_timeout,
+    :before_cutover,
+    :after_cutover,
     :active_peer,
     :active_node,
     :active_ref,
@@ -269,16 +271,24 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     GenServer.call(__MODULE__, :peer_node)
   end
 
+  @handoff_table :fly_deploy_handoff
+
   @impl true
   def init(opts) do
+    :ets.new(@handoff_table, [:named_table, :public, :set, write_concurrency: true])
+
     otp_app = Keyword.fetch!(opts, :otp_app)
     endpoint = Keyword.get(opts, :endpoint)
     shutdown_timeout = Keyword.get(opts, :shutdown_timeout)
+    before_cutover = Keyword.get(opts, :before_cutover)
+    after_cutover = Keyword.get(opts, :after_cutover)
 
     state = %__MODULE__{
       otp_app: otp_app,
       endpoint: endpoint || detect_endpoint(otp_app),
-      shutdown_timeout: shutdown_timeout
+      shutdown_timeout: shutdown_timeout,
+      before_cutover: before_cutover,
+      after_cutover: after_cutover
     }
 
     # Check for a pending upgrade to reapply on startup.
@@ -371,6 +381,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   defp do_upgrade(tarball_url, state) do
     Logger.info("[BlueGreen.PeerManager] Starting blue-green upgrade...")
     :persistent_term.put({__MODULE__, :upgrading}, true)
+    clear_handoff()
 
     try do
       do_upgrade_inner(tarball_url, state)
@@ -403,9 +414,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             new_ref = Process.monitor(peer_pid)
 
             # New peer is fully started with Endpoint bound via reuseport.
-            # The new peer was connected to the old peer BEFORE its sup tree
-            # started (inside start_peer), so lock checks, DurableServer, etc. could
-            # already see the outgoing node during boot.
+            # Arm the sentinel on the outgoing peer so before_cutover runs during
+            # OTP shutdown (after all user processes have terminated).
+            arm_sentinel(state.before_cutover, state.active_node, peer_node)
+
             stop_time = System.monotonic_time(:millisecond)
 
             graceful_stop_peer(
@@ -416,7 +428,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
             stop_elapsed = System.monotonic_time(:millisecond) - stop_time
 
+            # Sentinel wrote before_cutover's return value to handoff during shutdown
+            handoff_state = get_handoff(:__before_cutover_result__)
+
             cleanup_old_extract_dirs()
+            invoke_after_cutover(state.after_cutover, peer_node, handoff_state)
 
             Logger.info(
               "[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node} " <>
@@ -695,6 +711,16 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # persistent: true so it survives Application.load(:fly_deploy).
     :erpc.call(node, Application, :put_env, [:fly_deploy, :__role__, :peer, [persistent: true]])
 
+    # Tell the peer who the parent is so put_handoff/get_handoff can route erpc
+    # calls correctly. group_leader()-based discovery doesn't work because the
+    # application_master overrides the group_leader for application processes.
+    :erpc.call(node, Application, :put_env, [
+      :fly_deploy,
+      :__parent_node__,
+      node(),
+      [persistent: true]
+    ])
+
     # Inject SO_REUSEPORT so both old and new peers can bind the same port
     # simultaneously during cutover, eliminating the brief gap where neither
     # peer is listening.
@@ -844,6 +870,57 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end
   end
 
+  # -- Handoff storage -------------------------------------------------------
+
+  @doc false
+  def put_handoff(key, value) do
+    :ets.insert(@handoff_table, {key, value})
+    :ok
+  end
+
+  @doc false
+  def get_handoff(key) do
+    case :ets.lookup(@handoff_table, key) do
+      [{^key, value}] -> value
+      [] -> nil
+    end
+  end
+
+  @doc false
+  def get_all_handoff do
+    :ets.tab2list(@handoff_table) |> Map.new()
+  end
+
+  @doc false
+  def clear_handoff do
+    :ets.delete_all_objects(@handoff_table)
+    :ok
+  end
+
+  # Arms the sentinel on the outgoing peer with the before_cutover MFA.
+  # The sentinel will run the callback in its terminate/2 — after all user
+  # processes have shut down — and write the result to handoff ETS.
+  defp arm_sentinel(nil, _outgoing_node, _incoming_node), do: :ok
+
+  defp arm_sentinel(mfa, outgoing_node, incoming_node) do
+    :erpc.call(outgoing_node, FlyDeploy.BlueGreen.Sentinel, :arm, [mfa, incoming_node], 5_000)
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[BlueGreen.PeerManager] Failed to arm sentinel: #{kind}: #{inspect(reason)}"
+      )
+  end
+
+  # Invokes the after_cutover callback on the incoming peer via TaskSupervisor
+  # (fire-and-forget). The handoff_state from before_cutover is prepended to args.
+  defp invoke_after_cutover(nil, _peer_node, _handoff_state), do: :ok
+
+  defp invoke_after_cutover({mod, fun, args}, peer_node, handoff_state) do
+    Task.Supervisor.start_child(FlyDeploy.BlueGreen.TaskSupervisor, fn ->
+      :erpc.call(peer_node, mod, fun, [handoff_state | args])
+    end)
+  end
+
   # Graceful shutdown via :init.stop(). This triggers the full OTP supervision
   # tree shutdown: Endpoint drains connections (Bandit/ThousandIsland closes the
   # listening socket and finishes in-flight requests), GenServers get terminate/2
@@ -896,26 +973,32 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   # -- Reuseport injection ---------------------------------------------------
 
+  # NOTE: This is called via :erpc.call MFA on the peer node. It MUST be a
+  # named function (not anonymous) because the peer may have a different version
+  # of this module loaded (from the new tarball), causing :badfun on anonymous fns.
+  @doc false
+  def do_inject_reuseport(otp_app, endpoint) do
+    config = Application.get_env(otp_app, endpoint, [])
+    http_config = Keyword.get(config, :http, [])
+    ti_opts = Keyword.get(http_config, :thousand_island_options, [])
+    transport_opts = Keyword.get(ti_opts, :transport_options, [])
+
+    transport_opts = Keyword.merge(transport_opts, reuseport: true, reuseaddr: true)
+    ti_opts = Keyword.put(ti_opts, :transport_options, transport_opts)
+    http_config = Keyword.put(http_config, :thousand_island_options, ti_opts)
+    config = Keyword.put(config, :http, http_config)
+
+    # Must be persistent: true so the value survives Application.load/1.
+    # load_release_config sets endpoint config with persistent: true, then
+    # ensure_all_started calls Application.load which resets env to .app
+    # defaults + persistent overrides. Without persistent: true here, the
+    # reuseport config gets wiped by the persistent value from load_release_config
+    # (which doesn't include reuseport).
+    Application.put_env(otp_app, endpoint, config, persistent: true)
+  end
+
   defp inject_reuseport(node, otp_app, endpoint) do
-    :erpc.call(node, fn ->
-      config = Application.get_env(otp_app, endpoint, [])
-      http_config = Keyword.get(config, :http, [])
-      ti_opts = Keyword.get(http_config, :thousand_island_options, [])
-      transport_opts = Keyword.get(ti_opts, :transport_options, [])
-
-      transport_opts = Keyword.merge(transport_opts, reuseport: true, reuseaddr: true)
-      ti_opts = Keyword.put(ti_opts, :transport_options, transport_opts)
-      http_config = Keyword.put(http_config, :thousand_island_options, ti_opts)
-      config = Keyword.put(config, :http, http_config)
-
-      # Must be persistent: true so the value survives Application.load/1.
-      # load_release_config sets endpoint config with persistent: true, then
-      # ensure_all_started calls Application.load which resets env to .app
-      # defaults + persistent overrides. Without persistent: true here, the
-      # reuseport config gets wiped by the persistent value from load_release_config
-      # (which doesn't include reuseport).
-      Application.put_env(otp_app, endpoint, config, persistent: true)
-    end)
+    :erpc.call(node, __MODULE__, :do_inject_reuseport, [otp_app, endpoint])
   rescue
     e ->
       Logger.warning(
@@ -934,78 +1017,79 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   # We fix this by:
   # 1. Reading sys.config (Erlang term file) and applying static config values
   # 2. Evaluating runtime.exs (if present) and applying runtime config values
-  defp load_release_config(node, vsn_dir) do
-    :erpc.call(node, fn ->
-      # Step 1: Load compile-time config from sys.config
-      sys_config_path = Path.join(vsn_dir, "sys.config")
-      config_env = :prod
+  # NOTE: This is called via :erpc.call MFA on the peer node. It MUST be a
+  # named function (not anonymous) because the peer may have a different version
+  # of this module loaded (from the new tarball), causing :badfun on anonymous fns.
+  @doc false
+  def do_load_release_config(vsn_dir) do
+    # Step 1: Load compile-time config from sys.config
+    sys_config_path = Path.join(vsn_dir, "sys.config")
+    config_env = :prod
 
-      config_env =
-        if File.exists?(sys_config_path) do
-          case :file.consult(String.to_charlist(sys_config_path)) do
-            {:ok, [configs]} when is_list(configs) ->
-              for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
-                for {key, val} <- kvs, key not in [:config_providers, :config_provider_init] do
-                  Application.put_env(app, key, val, persistent: true)
-                end
-              end
-
-              Logger.info(
-                "[BlueGreen.PeerManager] Loaded compile-time config from #{sys_config_path}"
-              )
-
-              # Extract the config env from the config_providers entry.
-              # Elixir stores it as:
-              #   {elixir, [{config_providers, [{Config.Provider.Elixir, {path, [env: :staging]}}]}]}
-              extract_config_env(configs) || config_env
-
-            other ->
-              Logger.warning(
-                "[BlueGreen.PeerManager] Could not parse sys.config: #{inspect(other)}"
-              )
-
-              config_env
-          end
-        else
-          config_env
-        end
-
-      # Step 2: Load runtime config from runtime.exs
-      # Deep-merge runtime values on top of compile-time values, matching the
-      # semantics of Elixir's Config system (Config.__merge__). This correctly
-      # handles nested keyword lists (e.g., endpoint url/http config) and plain
-      # lists (e.g., check_origin) without crashing.
-      runtime_path = Path.join(vsn_dir, "runtime.exs")
-
-      if File.exists?(runtime_path) do
-        configs = Config.Reader.read!(runtime_path, env: config_env)
-
-        # Deep merge that recurses into nested keyword lists but replaces
-        # plain lists and non-list values — same as Config.__merge__/2.
-        deep_merge = fn deep_merge, v1, v2 ->
-          if Keyword.keyword?(v1) and Keyword.keyword?(v2) do
-            Keyword.merge(v1, v2, fn _k, a, b -> deep_merge.(deep_merge, a, b) end)
-          else
-            v2
-          end
-        end
-
-        for {app, kvs} <- configs do
-          for {key, val} <- kvs do
-            case Application.fetch_env(app, key) do
-              {:ok, existing} when is_list(existing) and is_list(val) ->
-                merged = deep_merge.(deep_merge, existing, val)
-                Application.put_env(app, key, merged, persistent: true)
-
-              _ ->
+    config_env =
+      if File.exists?(sys_config_path) do
+        case :file.consult(String.to_charlist(sys_config_path)) do
+          {:ok, [configs]} when is_list(configs) ->
+            for {app, kvs} <- configs, is_atom(app), is_list(kvs) do
+              for {key, val} <- kvs, key not in [:config_providers, :config_provider_init] do
                 Application.put_env(app, key, val, persistent: true)
+              end
             end
+
+            Logger.info(
+              "[BlueGreen.PeerManager] Loaded compile-time config from #{sys_config_path}"
+            )
+
+            extract_config_env(configs) || config_env
+
+          other ->
+            Logger.warning(
+              "[BlueGreen.PeerManager] Could not parse sys.config: #{inspect(other)}"
+            )
+
+            config_env
+        end
+      else
+        config_env
+      end
+
+    # Step 2: Load runtime config from runtime.exs
+    # Deep-merge runtime values on top of compile-time values, matching the
+    # semantics of Elixir's Config system (Config.__merge__). This correctly
+    # handles nested keyword lists (e.g., endpoint url/http config) and plain
+    # lists (e.g., check_origin) without crashing.
+    runtime_path = Path.join(vsn_dir, "runtime.exs")
+
+    if File.exists?(runtime_path) do
+      configs = Config.Reader.read!(runtime_path, env: config_env)
+
+      deep_merge = fn deep_merge, v1, v2 ->
+        if Keyword.keyword?(v1) and Keyword.keyword?(v2) do
+          Keyword.merge(v1, v2, fn _k, a, b -> deep_merge.(deep_merge, a, b) end)
+        else
+          v2
+        end
+      end
+
+      for {app, kvs} <- configs do
+        for {key, val} <- kvs do
+          case Application.fetch_env(app, key) do
+            {:ok, existing} when is_list(existing) and is_list(val) ->
+              merged = deep_merge.(deep_merge, existing, val)
+              Application.put_env(app, key, merged, persistent: true)
+
+            _ ->
+              Application.put_env(app, key, val, persistent: true)
           end
         end
-
-        Logger.info("[BlueGreen.PeerManager] Loaded runtime config from #{runtime_path}")
       end
-    end)
+
+      Logger.info("[BlueGreen.PeerManager] Loaded runtime config from #{runtime_path}")
+    end
+  end
+
+  defp load_release_config(node, vsn_dir) do
+    :erpc.call(node, __MODULE__, :do_load_release_config, [vsn_dir])
   rescue
     e ->
       Logger.warning(
