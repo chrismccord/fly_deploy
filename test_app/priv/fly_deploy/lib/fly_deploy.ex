@@ -333,6 +333,32 @@ defmodule FlyDeploy do
   end
 
   @doc """
+  Returns the incoming peer node that is replacing this peer, or `nil`.
+
+  Only meaningful on the **outgoing** peer during a blue-green upgrade — set
+  just before `:init.stop()` is called. User processes that trap exits can call
+  this in their `terminate/2` to discover the incoming peer and hand off state
+  directly via `:erpc.call/4`.
+
+  Returns `nil` on the initial boot, if not running as a peer, or if no
+  upgrade is in progress.
+
+  ## Example
+
+      # In a GenServer that traps exits
+      def terminate(_reason, state) do
+        case FlyDeploy.incoming_peer() do
+          nil -> :ok
+          node -> :erpc.call(node, MyApp.Cache, :warm, [state.entries])
+        end
+      end
+
+  """
+  def incoming_peer do
+    Application.get_env(:fly_deploy, :__incoming_peer__)
+  end
+
+  @doc """
   Returns a list of blue-green peer nodes visible to this node.
 
   Peer nodes are named with a `_peer_` segment (e.g., `my_app_peer_123@fd00::1`).

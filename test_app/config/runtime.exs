@@ -15,7 +15,7 @@ if config_env() == :prod do
   config :test_app, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   # Runtime config version — evaluated fresh at each boot
-  config :test_app, :runtime_version, "v1"
+  config :test_app, :runtime_version, "v3"
 
   # -- Config override tests -----------------------------------------------
   # These MUST override the values set in prod.exs. After blue-green deploy,

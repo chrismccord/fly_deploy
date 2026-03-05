@@ -205,6 +205,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
     # Build args list for fly deploy
     base_args = ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
+
     cache_args =
       if opts[:cache] == false do
         ["--no-cache"]
@@ -216,7 +217,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     build_args = Keyword.get_values(opts, :build_arg)
     build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
 
-    all_args = base_args ++ build_arg_flags ++ ["--no-cache"]
+    all_args = base_args ++ build_arg_flags ++ cache_args
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it

@@ -413,6 +413,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             Process.demonitor(state.active_ref, [:flush])
             new_ref = Process.monitor(peer_pid)
 
+            # Tell the outgoing peer who is replacing it, so user processes can
+            # call FlyDeploy.incoming_peer() in their terminate/2 callbacks.
+            set_incoming_peer(state.active_node, peer_node)
+
             # New peer is fully started with Endpoint bound via reuseport.
             # Arm the sentinel on the outgoing peer so before_cutover runs during
             # OTP shutdown (after all user processes have terminated).
@@ -895,6 +899,23 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   def clear_handoff do
     :ets.delete_all_objects(@handoff_table)
     :ok
+  end
+
+  # Sets __incoming_peer__ on the outgoing peer so user processes can discover
+  # the incoming peer via FlyDeploy.incoming_peer() during their terminate/2.
+  defp set_incoming_peer(outgoing_node, incoming_node) do
+    :erpc.call(
+      outgoing_node,
+      Application,
+      :put_env,
+      [:fly_deploy, :__incoming_peer__, incoming_node, [persistent: true]],
+      5_000
+    )
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[BlueGreen.PeerManager] Failed to set incoming_peer on #{outgoing_node}: #{kind}: #{inspect(reason)}"
+      )
   end
 
   # Arms the sentinel on the outgoing peer with the before_cutover MFA.

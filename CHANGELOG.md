@@ -1,3 +1,9 @@
+## 0.4.0 (2026-03-05)
+
+### Enhancements
+- Add sentinel-based cutover for blue-green deploys. `before_cutover` now runs during OTP shutdown (after user processes have terminated), allowing processes to write handoff state in `terminate/2` that `before_cutover` can aggregate.
+- Add `FlyDeploy.incoming_peer/0` — lets outgoing peer processes discover and communicate with the incoming peer during `terminate/2` for direct state handoff via `:erpc.call/4`.
+
 ## 0.3.9 (2026-03-04)
 
 ### Bug Fixes
