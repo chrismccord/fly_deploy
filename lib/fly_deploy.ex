@@ -196,6 +196,54 @@ defmodule FlyDeploy do
   defdelegate peer_node(), to: FlyDeploy.BlueGreen.PeerManager
 
   @doc """
+  Subscribes the calling process to FlyDeploy lifecycle events.
+
+  The subscriber receives messages of the form `{:fly_deploy, event, metadata}`.
+
+  ## Events
+
+  Hot upgrade events (delivered on the machine being upgraded):
+
+    * `{:fly_deploy, :hot_upgrade_started, %{app: atom, tarball_url: String.t}}`
+    * `{:fly_deploy, :hot_upgrade_complete, %{app: atom, modules_reloaded: integer, processes_upgraded: integer, processes_failed: integer, duration_ms: integer}}`
+
+  Blue-green events (delivered to the appropriate peer via erpc):
+
+    * `{:fly_deploy, :blue_green_upgrade_started, %{app: atom}}` — sent to the **old** peer
+    * `{:fly_deploy, :blue_green_incoming_peer_started, %{incoming_node: node, outgoing_node: node, start_ms: integer}}` — sent to the **old** peer
+    * `{:fly_deploy, :blue_green_upgrade_complete, %{active_node: node, start_ms: integer, shutdown_ms: integer}}` — sent to the **new** peer
+
+  ## Example
+
+      defmodule MyApp.DeployListener do
+        use GenServer
+
+        def start_link(_), do: GenServer.start_link(__MODULE__, [])
+
+        def init(_) do
+          FlyDeploy.subscribe()
+          {:ok, %{}}
+        end
+
+        def handle_info({:fly_deploy, event, meta}, state) do
+          Logger.info("Deploy event: \#{event} \#{inspect(meta)}")
+          {:noreply, state}
+        end
+      end
+
+  """
+  def subscribe do
+    Registry.register(FlyDeploy.Registry, :events, [])
+  end
+
+  @doc false
+  def broadcast(event, metadata) do
+    Registry.dispatch(FlyDeploy.Registry, :events, fn entries ->
+      for {pid, _} <- entries, do: send(pid, {:fly_deploy, event, metadata})
+    end)
+  end
+
+  @doc """
   Returns the cluster-wide blue-green deployment status.
 
   Queries every reachable parent node's PeerManager for its state, and checks

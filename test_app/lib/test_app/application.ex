@@ -31,6 +31,8 @@ defmodule TestApp.Application do
       {Phoenix.PubSub, name: TestApp.PubSub},
       # Start the counter GenServer for hot upgrade testing
       TestApp.Counter,
+      # Subscribe to FlyDeploy lifecycle events for test verification
+      TestApp.DeployListener,
       # Start to serve requests, typically the last entry
       TestAppWeb.Endpoint
     ]

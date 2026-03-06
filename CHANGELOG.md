@@ -1,3 +1,8 @@
+## 0.4.1 (2026-03-06)
+
+### Enhancements
+- Add `FlyDeploy.subscribe/0` for node-local deploy event notifications. Subscribers receive `{:fly_deploy, event, metadata}` messages for hot upgrade and blue-green lifecycle events.
+
 ## 0.4.0 (2026-03-05)
 
 ### Enhancements

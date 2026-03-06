@@ -391,6 +391,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   end
 
   defp do_upgrade_inner(tarball_url, state) do
+    broadcast_to_peer(state.active_node, :blue_green_upgrade_started, %{app: state.otp_app})
+
     case download_and_extract(tarball_url, state.otp_app) do
       {:ok, new_paths, release_dir} ->
         start_time = System.monotonic_time(:millisecond)
@@ -408,6 +410,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             Logger.info(
               "[BlueGreen.PeerManager] Incoming peer #{peer_node} started (#{start_elapsed}ms)"
             )
+
+            broadcast_to_peer(state.active_node, :blue_green_incoming_peer_started, %{
+              incoming_node: peer_node,
+              outgoing_node: state.active_node,
+              start_ms: start_elapsed
+            })
 
             # Swap monitors: stop watching the old peer, start watching the new one
             Process.demonitor(state.active_ref, [:flush])
@@ -438,6 +446,29 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
             cleanup_old_extract_dirs()
             invoke_after_cutover(state.after_cutover, peer_node, handoff_state)
 
+            broadcast_to_peer(peer_node, :blue_green_upgrade_complete, %{
+              active_node: peer_node,
+              start_ms: start_elapsed,
+              shutdown_ms: stop_elapsed
+            })
+
+            # Clear outgoing_peer on the new active peer — upgrade is complete.
+            # FlyDeploy.outgoing_peer() != nil means "mid-upgrade".
+            try do
+              :erpc.call(
+                peer_node,
+                Application,
+                :put_env,
+                [:fly_deploy, :__outgoing_peer__, nil, [persistent: true]],
+                5_000
+              )
+            catch
+              kind, reason ->
+                Logger.warning(
+                  "[BlueGreen.PeerManager] Failed to clear outgoing_peer: #{kind}: #{inspect(reason)}"
+                )
+            end
+
             Logger.info(
               "[BlueGreen.PeerManager] Upgrade complete. Active peer: #{peer_node} " <>
                 "(start: #{start_elapsed}ms, shutdown: #{stop_elapsed}ms)"
@@ -454,6 +485,15 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         Logger.error("[BlueGreen.PeerManager] Download failed: #{inspect(reason)}")
         {:error, reason}
     end
+  end
+
+  defp broadcast_to_peer(node, event, meta) do
+    :erpc.call(node, FlyDeploy, :broadcast, [event, meta], 5_000)
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[BlueGreen.PeerManager] Failed to broadcast #{event}: #{kind}: #{inspect(reason)}"
+      )
   end
 
   defp download_and_extract(tarball_url, otp_app) do

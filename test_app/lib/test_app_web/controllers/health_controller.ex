@@ -23,10 +23,15 @@ defmodule TestAppWeb.HealthController do
         nil
       end
 
+    deploy_events = Enum.map(TestApp.DeployListener.get_events(), fn {event, meta} ->
+      %{event: to_string(event), metadata: meta}
+    end)
+
     json(conn, %{
       status: "ok-v3",
       components_defined: Code.ensure_loaded?(FlyDeploy.Components),
       fly_deploy_vsn: fly_deploy_vsn,
+      deploy_events: deploy_events,
       compile_config: Application.get_env(:test_app, :compile_version),
       runtime_config: Application.get_env(:test_app, :runtime_version),
       prod_override_scalar: Application.get_env(:test_app, :prod_override_scalar),

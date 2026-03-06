@@ -51,6 +51,9 @@ defmodule FlyDeploy.Upgrader do
   end
 
   defp do_hot_upgrade(tarball_url, app, opts) do
+    FlyDeploy.broadcast(:hot_upgrade_started, %{app: app, tarball_url: tarball_url})
+    upgrade_start = System.monotonic_time(:millisecond)
+
     IO.puts("Downloading tarball from #{tarball_url}...")
     {:ok, _} = Application.ensure_all_started(:req)
 
@@ -235,6 +238,16 @@ defmodule FlyDeploy.Upgrader do
     )
 
     IO.puts("✅ Hot reload complete!")
+
+    duration_ms = System.monotonic_time(:millisecond) - upgrade_start
+
+    FlyDeploy.broadcast(:hot_upgrade_complete, %{
+      app: app,
+      modules_reloaded: result.modules_reloaded,
+      processes_upgraded: result.processes_succeeded,
+      processes_failed: result.processes_failed,
+      duration_ms: duration_ms
+    })
 
     # Clean up temp files now that upgrade is complete
     File.rm_rf(upgrade_dir)

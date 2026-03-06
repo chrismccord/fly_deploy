@@ -4,7 +4,7 @@ defmodule FlyDeploy.MixProject do
   def project do
     [
       app: :fly_deploy,
-      version: "0.4.0",
+      version: "0.4.1",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -20,6 +20,7 @@ defmodule FlyDeploy.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
+      mod: {FlyDeploy.Application, []},
       extra_applications: [:logger]
     ]
   end

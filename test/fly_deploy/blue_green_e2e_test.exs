@@ -240,6 +240,21 @@ defmodule FlyDeploy.BlueGreenE2ETest do
       "✓ Blue-green upgrade successful - v2 running, fresh state, new PID, handoff verified\n"
     )
 
+    # Verify deploy events on the new peer — should have received :blue_green_upgrade_complete
+    IO.puts("  Verifying deploy event subscriptions on new peer...")
+    deploy_events = after_upgrade["deploy_events"]
+    event_names = Enum.map(deploy_events, & &1["event"])
+
+    assert "blue_green_upgrade_complete" in event_names,
+           "New peer should have received :blue_green_upgrade_complete. Got: #{inspect(event_names)}"
+
+    bg_complete = Enum.find(deploy_events, &(&1["event"] == "blue_green_upgrade_complete"))
+    assert bg_complete["metadata"]["active_node"] != nil
+    assert is_integer(bg_complete["metadata"]["start_ms"])
+
+    IO.puts("  Deploy events on new peer: #{inspect(event_names)}")
+    IO.puts("✓ VERIFIED: FlyDeploy.subscribe() delivered blue-green upgrade event to new peer\n")
+
     # Step 4a: Verify static assets were updated
     IO.puts("Step 4a: Verifying static assets were updated...")
 
@@ -290,6 +305,27 @@ defmodule FlyDeploy.BlueGreenE2ETest do
     )
 
     IO.puts("✓ Hot upgrade inside peer successful - state preserved, same PID\n")
+
+    # Verify accumulated deploy events — should have both blue-green AND hot events
+    IO.puts("  Verifying accumulated deploy events after hot upgrade inside peer...")
+    hot_deploy_events = after_hot["deploy_events"]
+    hot_event_names = Enum.map(hot_deploy_events, & &1["event"])
+
+    assert "blue_green_upgrade_complete" in hot_event_names,
+           "Should still have :blue_green_upgrade_complete from earlier. Got: #{inspect(hot_event_names)}"
+
+    assert "hot_upgrade_started" in hot_event_names,
+           "Should have received :hot_upgrade_started. Got: #{inspect(hot_event_names)}"
+
+    assert "hot_upgrade_complete" in hot_event_names,
+           "Should have received :hot_upgrade_complete. Got: #{inspect(hot_event_names)}"
+
+    hot_complete = Enum.find(hot_deploy_events, &(&1["event"] == "hot_upgrade_complete"))
+    assert hot_complete["metadata"]["app"] == "test_app"
+    assert is_integer(hot_complete["metadata"]["duration_ms"])
+
+    IO.puts("  Accumulated deploy events: #{inspect(hot_event_names)}")
+    IO.puts("✓ VERIFIED: FlyDeploy.subscribe() delivered both blue-green and hot events\n")
 
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
@@ -408,10 +444,15 @@ defmodule FlyDeploy.BlueGreenE2ETest do
             nil
           end
 
+        deploy_events = Enum.map(TestApp.DeployListener.get_events(), fn {event, meta} ->
+          %{event: to_string(event), metadata: meta}
+        end)
+
         json(conn, %{
           status: "ok-#{version}",
           components_defined: Code.ensure_loaded?(FlyDeploy.Components),
           fly_deploy_vsn: fly_deploy_vsn,
+          deploy_events: deploy_events,
           compile_config: Application.get_env(:test_app, :compile_version),
           runtime_config: Application.get_env(:test_app, :runtime_version),
           prod_override_scalar: Application.get_env(:test_app, :prod_override_scalar),

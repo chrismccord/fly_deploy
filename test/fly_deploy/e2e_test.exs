@@ -306,6 +306,30 @@ defmodule FlyDeploy.E2ETest do
     IO.puts("  base_image_ref: #{fly_deploy_vsn["base_image_ref"]}")
     IO.puts("✓ VERIFIED: FlyDeploy.current_vsn() correctly tracks hot upgrade\n")
 
+    # Step 4f: Verify deploy event subscriptions received hot upgrade events
+    IO.puts("Step 4f: Verifying deploy event subscriptions...")
+    deploy_events = after_upgrade["deploy_events"]
+    event_names = Enum.map(deploy_events, & &1["event"])
+
+    assert "hot_upgrade_started" in event_names,
+           "Should have received :hot_upgrade_started event. Got: #{inspect(event_names)}"
+
+    assert "hot_upgrade_complete" in event_names,
+           "Should have received :hot_upgrade_complete event. Got: #{inspect(event_names)}"
+
+    complete_event = Enum.find(deploy_events, &(&1["event"] == "hot_upgrade_complete"))
+    assert complete_event["metadata"]["app"] == "test_app"
+    assert is_integer(complete_event["metadata"]["duration_ms"])
+    assert complete_event["metadata"]["modules_reloaded"] > 0
+
+    IO.puts("  Deploy events received: #{inspect(event_names)}")
+
+    IO.puts(
+      "  hot_upgrade_complete metadata: app=#{complete_event["metadata"]["app"]}, modules=#{complete_event["metadata"]["modules_reloaded"]}, duration=#{complete_event["metadata"]["duration_ms"]}ms"
+    )
+
+    IO.puts("✓ VERIFIED: FlyDeploy.subscribe() delivered hot upgrade events\n")
+
     # Step 5: Restart machines
     IO.puts("Step 5: Restarting all machines...")
     restart_all_machines()
@@ -405,10 +429,15 @@ defmodule FlyDeploy.E2ETest do
         counter_info = TestApp.Counter.get_info()
         fly_deploy_vsn = FlyDeploy.current_vsn()
 
+        deploy_events = Enum.map(TestApp.DeployListener.get_events(), fn {event, meta} ->
+          %{event: to_string(event), metadata: meta}
+        end)
+
         json(conn, %{
           status: "ok-#{version}",
           components_defined: Code.ensure_loaded?(FlyDeploy.Components),
           fly_deploy_vsn: fly_deploy_vsn,
+          deploy_events: deploy_events,
           counter: %{
             count: counter_info.count,
             version: counter_info.version,
