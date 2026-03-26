@@ -460,17 +460,16 @@ defmodule FlyDeploy.Orchestrator do
       "deployed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
-    # Write to mode-specific field:
-    # - hot: write hot_upgrade, preserve blue_green_upgrade
-    # - blue_green: write blue_green_upgrade, clear hot_upgrade (new peer = fresh start)
+    # Write to mode-specific field and clear the other mode's field.
+    # This prevents the other mode's Poller from re-applying a stale upgrade
+    # when the S3 object's etag changes.
     updated =
       case {mode, existing} do
         {_, nil} ->
-          # no existing state - machines will initialize image_ref on boot
           if mode == "blue_green" do
-            %{"blue_green_upgrade" => upgrade_data}
+            %{"blue_green_upgrade" => upgrade_data, "hot_upgrade" => nil}
           else
-            %{"hot_upgrade" => upgrade_data}
+            %{"hot_upgrade" => upgrade_data, "blue_green_upgrade" => nil}
           end
 
         {"blue_green", current} ->
@@ -479,7 +478,9 @@ defmodule FlyDeploy.Orchestrator do
           |> Map.put("hot_upgrade", nil)
 
         {_hot, current} ->
-          Map.put(current, "hot_upgrade", upgrade_data)
+          current
+          |> Map.put("hot_upgrade", upgrade_data)
+          |> Map.put("blue_green_upgrade", nil)
       end
 
     # write updated state
