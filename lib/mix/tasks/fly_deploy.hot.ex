@@ -219,7 +219,9 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     build_args = Keyword.get_values(opts, :build_arg)
     build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
 
-    all_args = base_args ++ build_arg_flags ++ cache_args ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
+    all_args =
+      base_args ++
+        build_arg_flags ++ cache_args ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it

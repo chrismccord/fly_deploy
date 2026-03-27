@@ -4,6 +4,9 @@
 - Fix hot deploy triggering stale blue-green upgrade. Both modes shared a single marker file; a hot deploy would overwrite it, causing the blue-green Poller to re-apply a stale upgrade seconds later. Split into mode-specific markers (`fly_deploy_marker_hot.json`, `fly_deploy_marker_blue_green.json`).
 - Halt the BEAM on initial peer start failure instead of leaving a zombie machine with no traffic serving.
 
+### Enhancements
+Support `--buildkit` flag
+
 ## 0.4.1 (2026-03-06)
 
 ### Enhancements
