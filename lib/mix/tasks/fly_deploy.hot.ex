@@ -52,6 +52,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * `--no-cache` - Do not use previously cached builder docker layers
     * `--force` - Override deployment lock (use with caution)
     * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
+    * `--buildkit` - Use buildkit based Fly builder
     * `--mode` - Upgrade mode: "hot" (default) or "blue_green"
 
   ## Required Setup
@@ -103,6 +104,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           timeout: :integer,
           force: :boolean,
           lock_timeout: :integer,
+          buildkit: :boolean,
           mode: :string
         ]
       )
@@ -217,7 +219,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     build_args = Keyword.get_values(opts, :build_arg)
     build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
 
-    all_args = base_args ++ build_arg_flags ++ cache_args
+    all_args = base_args ++ build_arg_flags ++ cache_args ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it
