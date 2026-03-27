@@ -193,6 +193,146 @@ defmodule FlyDeploy do
   before other processes start.
   """
   defdelegate child_spec(opts), to: FlyDeploy.Poller
+  defdelegate peer_node(), to: FlyDeploy.BlueGreen.PeerManager
+
+  @doc """
+  Subscribes the calling process to FlyDeploy lifecycle events.
+
+  The subscriber receives messages of the form `{:fly_deploy, event, metadata}`.
+
+  ## Events
+
+  Hot upgrade events (delivered on the machine being upgraded):
+
+    * `{:fly_deploy, :hot_upgrade_started, %{app: atom, tarball_url: String.t}}`
+    * `{:fly_deploy, :hot_upgrade_complete, %{app: atom, modules_reloaded: integer, processes_upgraded: integer, processes_failed: integer, duration_ms: integer}}`
+
+  Blue-green events (delivered to the appropriate peer via erpc):
+
+    * `{:fly_deploy, :blue_green_upgrade_started, %{app: atom}}` — sent to the **old** peer
+    * `{:fly_deploy, :blue_green_incoming_peer_started, %{incoming_node: node, outgoing_node: node, start_ms: integer}}` — sent to the **old** peer
+    * `{:fly_deploy, :blue_green_upgrade_complete, %{active_node: node, start_ms: integer, shutdown_ms: integer}}` — sent to the **new** peer
+
+  ## Example
+
+      defmodule MyApp.DeployListener do
+        use GenServer
+
+        def start_link(_), do: GenServer.start_link(__MODULE__, [])
+
+        def init(_) do
+          FlyDeploy.subscribe()
+          {:ok, %{}}
+        end
+
+        def handle_info({:fly_deploy, event, meta}, state) do
+          Logger.info("Deploy event: \#{event} \#{inspect(meta)}")
+          {:noreply, state}
+        end
+      end
+
+  """
+  def subscribe do
+    Registry.register(FlyDeploy.Registry, :events, [])
+  end
+
+  @doc false
+  def broadcast(event, metadata) do
+    Registry.dispatch(FlyDeploy.Registry, :events, fn entries ->
+      for {pid, _} <- entries, do: send(pid, {:fly_deploy, event, metadata})
+    end)
+  end
+
+  @doc """
+  Returns the cluster-wide blue-green deployment status.
+
+  Queries every reachable parent node's PeerManager for its state, and checks
+  peer connectivity from the caller's perspective. Callable from any node
+  (parent or peer).
+
+  ## Return Value
+
+  A list of machine status maps:
+
+      [
+        %{
+          machine_id: "abc123def456",
+          region: "iad",
+          parent: :"fly_deploy_parent_123@fd00::1",
+          active_peer: :"sprites_peer_abc123_1@fd00::1",
+          active_peer_alive: true,
+          peer_connected: true,
+          upgrading: false
+        },
+        ...
+      ]
+
+  Fields:
+
+  - `:machine_id` - Fly machine ID
+  - `:region` - Fly region code
+  - `:parent` - Parent node name on this machine
+  - `:active_peer` - The currently active peer node name
+  - `:active_peer_alive` - Whether the peer OS process is alive (from parent's view)
+  - `:peer_connected` - Whether the active peer is reachable from the caller
+  - `:upgrading` - Whether a blue-green upgrade is in progress on this machine
+
+  If a parent is unreachable, returns `%{parent: node, error: :unreachable}`.
+
+  ## Example
+
+      FlyDeploy.blue_green_cluster_status()
+      #=> [
+      #     %{machine_id: "28715e9ad771", region: "iad", parent: ..., active_peer: ...,
+      #       active_peer_alive: true, peer_connected: true, upgrading: false},
+      #     %{machine_id: "d8de3d0b2d91", region: "ord", parent: ..., active_peer: ...,
+      #       active_peer_alive: true, peer_connected: true, upgrading: false}
+      #   ]
+
+  """
+  def blue_green_cluster_status do
+    visible_nodes = MapSet.new(Node.list())
+
+    # Find all parent nodes (named fly_deploy_parent_*)
+    parents =
+      Node.list()
+      |> Enum.filter(fn n ->
+        n |> Atom.to_string() |> String.starts_with?("fly_deploy_parent_")
+      end)
+
+    # Include local node if it's a parent
+    parents =
+      if Node.self() |> Atom.to_string() |> String.starts_with?("fly_deploy_parent_") do
+        [Node.self() | parents]
+      else
+        parents
+      end
+
+    parents
+    |> Task.async_stream(
+      fn parent ->
+        try do
+          info = :erpc.call(parent, FlyDeploy.BlueGreen.PeerManager, :get_info, [], 5_000)
+
+          %{
+            machine_id: info.machine_id,
+            region: info.region,
+            parent: parent,
+            active_peer: info.active_node,
+            active_peer_alive: info.active_peer_alive,
+            peer_connected: MapSet.member?(visible_nodes, info.active_node),
+            upgrading: info.upgrading
+          }
+        catch
+          _, _ -> %{parent: parent, error: :unreachable}
+        end
+      end,
+      max_concurrency: 20,
+      timeout: 10_000
+    )
+    |> Enum.map(fn {:ok, result} -> result end)
+    |> Enum.sort_by(& &1[:region])
+  end
 
   @doc """
   Returns the current code version fingerprint.
@@ -217,6 +357,77 @@ defmodule FlyDeploy do
 
   """
   defdelegate current_vsn(), to: FlyDeploy.Poller
+
+  @doc """
+  Returns the outgoing peer node that this peer is replacing, or `nil`.
+
+  Only meaningful during a blue-green upgrade — the incoming peer can call this
+  during its boot sequence to discover the outgoing peer for handoff coordination
+  (e.g., releasing a volume lock, draining connections, transferring state).
+
+  Returns `nil` on the initial boot (no outgoing peer) or if not running as a peer.
+
+  ## Example
+
+      # In your Application.start/2 or a GenServer init
+      case FlyDeploy.outgoing_peer() do
+        nil -> :ok
+        node -> :erpc.call(node, MyApp.Lock, :release, [])
+      end
+
+  """
+  def outgoing_peer do
+    Application.get_env(:fly_deploy, :__outgoing_peer__)
+  end
+
+  @doc """
+  Returns the incoming peer node that is replacing this peer, or `nil`.
+
+  Only meaningful on the **outgoing** peer during a blue-green upgrade — set
+  just before `:init.stop()` is called. User processes that trap exits can call
+  this in their `terminate/2` to discover the incoming peer and hand off state
+  directly via `:erpc.call/4`.
+
+  Returns `nil` on the initial boot, if not running as a peer, or if no
+  upgrade is in progress.
+
+  ## Example
+
+      # In a GenServer that traps exits
+      def terminate(_reason, state) do
+        case FlyDeploy.incoming_peer() do
+          nil -> :ok
+          node -> :erpc.call(node, MyApp.Cache, :warm, [state.entries])
+        end
+      end
+
+  """
+  def incoming_peer do
+    Application.get_env(:fly_deploy, :__incoming_peer__)
+  end
+
+  @doc """
+  Returns a list of blue-green peer nodes visible to this node.
+
+  Peer nodes are named with a `_peer_` segment (e.g., `my_app_peer_123@fd00::1`).
+  This filters `Node.list/0` to only return peer nodes, excluding parent nodes,
+  remsh sessions, and other non-peer nodes.
+
+  Useful for clustering logic where you want to ignore the hidden parent nodes
+  and only interact with the peers that actually serve traffic.
+
+  ## Example
+
+      FlyDeploy.list_remote_peers()
+      #=> [:"my_app_peer_818@fdaa:28:186d:a7b:577:86b0:d474:2"]
+
+  """
+  def list_remote_peers do
+    Node.list()
+    |> Enum.filter(fn node ->
+      node |> Atom.to_string() |> String.contains?("_peer_")
+    end)
+  end
 
   @doc """
   Deprecated: Use `{FlyDeploy, otp_app: :my_app}` in your supervision tree instead.

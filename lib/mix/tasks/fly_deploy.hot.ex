@@ -49,9 +49,11 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * `--image` - Use specific pre-built image
     * `--build-arg` - Pass build-time variables to Docker (can be used multiple times)
     * `--dry-run` - Show what would be done without executing
+    * `--no-cache` - Do not use previously cached builder docker layers
     * `--force` - Override deployment lock (use with caution)
     * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
     * `--buildkit` - Use buildkit based Fly builder
+    * `--mode` - Upgrade mode: "hot" (default) or "blue_green"
 
   ## Required Setup
 
@@ -95,6 +97,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           config: :string,
           skip_build: :boolean,
           dry_run: :boolean,
+          cache: :boolean,
           image: :string,
           build_arg: :keep,
           max_concurrency: :integer,
@@ -102,8 +105,18 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
           force: :boolean,
           lock_timeout: :integer,
           buildkit: :boolean,
+          mode: :string
         ]
       )
+
+    # Normalize mode to atom
+    opts =
+      case Keyword.get(opts, :mode) do
+        "blue_green" -> Keyword.put(opts, :mode, :blue_green)
+        "hot" -> Keyword.put(opts, :mode, :hot)
+        nil -> opts
+        other -> Mix.raise("Unknown mode: #{other}. Use --mode hot or --mode blue_green")
+      end
 
     # Start required applications
     {:ok, _} = Application.ensure_all_started(:req)
@@ -195,11 +208,18 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     # Build args list for fly deploy
     base_args = ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
 
+    cache_args =
+      if opts[:cache] == false do
+        ["--no-cache"]
+      else
+        []
+      end
+
     # Add --build-arg flags if provided
     build_args = Keyword.get_values(opts, :build_arg)
     build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
 
-    all_args = base_args ++ build_arg_flags ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
+    all_args = base_args ++ build_arg_flags ++ cache_args ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it
@@ -297,7 +317,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         ["-e", "DEPLOY_VERSION=#{config.version}"],
         ["-e", "DEPLOY_MAX_CONCURRENCY=#{config.max_concurrency}"],
         ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"],
-        ["-e", "DEPLOY_SUSPEND_TIMEOUT=#{config.suspend_timeout}"]
+        ["-e", "DEPLOY_SUSPEND_TIMEOUT=#{config.suspend_timeout}"],
+        ["-e", "DEPLOY_MODE=#{config.mode || :hot}"]
       ] ++
         if opts[:force] do
           [["-e", "DEPLOY_FORCE=true"]]

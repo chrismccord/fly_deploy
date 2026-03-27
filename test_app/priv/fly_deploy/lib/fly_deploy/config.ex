@@ -67,7 +67,9 @@ defmodule FlyDeploy.Config do
     :max_concurrency,
     :timeout,
     :suspend_timeout,
-    :version
+    :version,
+    :mode,
+    :endpoint
   ]
 
   @type t :: %__MODULE__{
@@ -79,7 +81,9 @@ defmodule FlyDeploy.Config do
           max_concurrency: pos_integer(),
           timeout: pos_integer(),
           suspend_timeout: pos_integer(),
-          version: String.t()
+          version: String.t(),
+          mode: :hot | :blue_green,
+          endpoint: module() | nil
         }
 
   @doc """
@@ -113,6 +117,7 @@ defmodule FlyDeploy.Config do
       |> merge_fly_config(fly_config)
       |> apply_cli_opts(cli_opts)
       |> Map.put(:fly_config, fly_config_path)
+      |> apply_mode_defaults(cli_opts, mix_config)
 
     struct!(__MODULE__, merged)
   end
@@ -137,7 +142,9 @@ defmodule FlyDeploy.Config do
       max_concurrency: 20,
       timeout: 60_000,
       suspend_timeout: 10_000,
-      version: get_app_version(otp_app)
+      version: get_app_version(otp_app),
+      mode: :hot,
+      endpoint: nil
     }
   end
 
@@ -165,6 +172,20 @@ defmodule FlyDeploy.Config do
     |> Map.put(:env, env)
   end
 
+  # Blue-green deploys take much longer than hot upgrades (peer boot can take 120s+,
+  # plus tarball download and old peer shutdown), so use a 10-minute default timeout
+  # unless the user explicitly set one via CLI or Mix config.
+  defp apply_mode_defaults(config, cli_opts, mix_config) do
+    timeout_explicitly_set =
+      Keyword.has_key?(cli_opts, :timeout) or Keyword.has_key?(mix_config, :timeout)
+
+    if config.mode == :blue_green and not timeout_explicitly_set do
+      Map.put(config, :timeout, 600_000)
+    else
+      config
+    end
+  end
+
   defp apply_cli_opts(config, cli_opts) do
     Enum.reduce(cli_opts, config, fn
       {:config, _path}, acc ->
@@ -176,6 +197,9 @@ defmodule FlyDeploy.Config do
 
       {:max_concurrency, n}, acc ->
         Map.put(acc, :max_concurrency, n)
+
+      {:mode, mode}, acc ->
+        Map.put(acc, :mode, mode)
 
       # Skip flags that aren't config
       {_key, _value}, acc ->

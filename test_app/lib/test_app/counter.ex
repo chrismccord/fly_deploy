@@ -1,13 +1,12 @@
-# Cache buster: 1769702686210137163
+# Cache buster: 1772818508858278153
 defmodule TestApp.Counter do
   @moduledoc """
-  A simple GenServer counter for testing hot code upgrades.
+  A simple GenServer counter for testing deploys.
   """
   use GenServer
 
   @counter_vsn "v3"
 
-  # Define a struct to test protocol implementations
   defmodule State do
     @moduledoc false
     defstruct [:count, :version, :protocol_version]
@@ -37,7 +36,8 @@ defmodule TestApp.Counter do
 
   @impl true
   def init(_opts) do
-    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v1"}}
+    Process.flag(:trap_exit, true)
+    {:ok, %State{count: 0, version: @counter_vsn, protocol_version: "v3"}}
   end
 
   @impl true
@@ -64,17 +64,19 @@ defmodule TestApp.Counter do
   end
 
   @impl true
+  def terminate(_reason, state) do
+    FlyDeploy.BlueGreen.put_handoff(:counter_state, state.count)
+    :ok
+  end
+
+  @impl true
   def code_change(_old_vsn, state, _extra) do
-    # Migrate state - update version to new module version to prove code_change was called
-    # Preserve count but update version field to match new module version
     {:ok, Map.put(state, :version, vsn())}
   end
 end
 
-# Protocol implementation for testing consolidated protocol hot upgrades
 defimpl String.Chars, for: TestApp.Counter.State do
   def to_string(%TestApp.Counter.State{} = state) do
-    "Counter[count=#{state.count}, version=#{state.version}, protocol_v=#{state.protocol_version}]"
+    "CounterV2[count=#{state.count}, version=#{state.version}, protocol_v=#{state.protocol_version}]"
   end
 end
-

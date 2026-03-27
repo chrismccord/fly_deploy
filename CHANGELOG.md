@@ -1,3 +1,83 @@
+## 0.4.1 (2026-03-06)
+
+### Enhancements
+- Add `FlyDeploy.subscribe/0` for node-local deploy event notifications. Subscribers receive `{:fly_deploy, event, metadata}` messages for hot upgrade and blue-green lifecycle events.
+
+## 0.4.0 (2026-03-05)
+
+### Enhancements
+- Add sentinel-based cutover for blue-green deploys. `before_cutover` now runs during OTP shutdown (after user processes have terminated), allowing processes to write handoff state in `terminate/2` that `before_cutover` can aggregate.
+- Add `FlyDeploy.incoming_peer/0` — lets outgoing peer processes discover and communicate with the incoming peer during `terminate/2` for direct state handoff via `:erpc.call/4`.
+
+## 0.3.9 (2026-03-04)
+
+### Bug Fixes
+- Fix `eaddrinuse` on blue-green deploys caused by `:badfun` when `inject_reuseport` and `load_release_config` used anonymous functions in `:erpc.call`. Anonymous functions carry module version hashes that don't match when fly_deploy is upgraded between deploys. Converted to named MFA calls.
+- Fix `:badarg` failures when hot deploying minor `fly_deploy` version changes caused by anon functions
+  cross the :erpc fence. Fixed by using MFA's instead.
+
+### Enhancements
+- Add `before_cutover` / `after_cutover` MFA callbacks for blue-green deploys. `before_cutover` runs on the outgoing peer and returns handoff state; `after_cutover` runs on the incoming peer and receives it.
+
+## 0.3.8 (2026-03-03)
+
+### Bug Fixes
+- Fix `runtime.exs` `config_env()` returning `:prod` instead of the actual MIX_ENV (e.g., `:staging`) in blue-green peers
+
+## 0.3.7 (2026-03-03)
+
+### Enhancements
+- Simplify BlueGreen startup
+
+## 0.3.6 (2026-03-03)
+
+### Enhancements
+- Add parent-level children to `FlyDeploy.BlueGreen.start_link/2` for cross-machine mesh formation. Pass children like `DNSCluster` to run on the parent node, which has a consistent basename for DNS discovery. Peers mesh transitively through the parent backbone via `global` auto-connect.
+
+## 0.3.5 (2026-03-02)
+
+### Bug Fixes
+- Fix `runtime.exs` config not overriding `prod.exs` values after blue-green deploy. `load_release_config` was using `Keyword.merge` which crashes on plain lists (e.g., `check_origin`) and only does a shallow merge. Now uses a deep merge matching Elixir's `Config.__merge__` semantics.
+
+### Enhancements
+- Increase default deploy timeout for blue-green mode from 60s to 10 minutes
+
+## 0.3.4 (2026-03-02)
+
+### Enhancements
+- Protection against concurrent bg deploys
+- Add `FlyDeploy.blue_green_cluster_status()`
+- Fix early timeout errors being display on bluegreen deploys
+
+## 0.3.3 (2026-03-02)
+
+### Bug Fixes
+- Fix `SO_REUSEPORT` not being set on peer listeners, causing `eaddrinuse` on blue-green upgrades. The reuseport config was being wiped by `Application.load/1` because it was set without `persistent: true`.
+
+### Enhancements
+- Add `FlyDeploy.outgoing_peer/0` to get the outgoing peer node during blue-green upgrades, useful for handoff coordination
+
+## 0.3.2 (2026-02-27)
+
+### Bug Fixes
+- Fix failed peer start or peer nodedown failing to bring parent app down
+
+## 0.3.1 (2026-02-27)
+
+### Bug Fixes
+- Do not start blue_green parent as hidden node
+
+## 0.3.0 (2026-02-27)
+
+### Enhancements
+- **Blue-green deploys via hot `:peer` nodes**: Boot your app in a child BEAM process and swap to a new one on upgrade. See `FlyDeploy.BlueGreen` for setup.
+- **`mix fly_deploy.blue_green`**: New mix task for blue-green deploys (equivalent to `mix fly_deploy.hot --mode blue_green`)
+- **Hot upgrades inside blue-green peers**: The peer runs its own `FlyDeploy.Poller` with `mode: :hot`, so you can apply hot code upgrades in-place inside a running peer
+- **Restart reapply**: On machine restart, both blue-green base and hot overlay are reapplied from S3 automatically
+- **`FlyDeploy.list_remote_peers/0`**: List peer nodes visible from the current node, filtering out parent nodes and remsh sessions
+- **`FlyDeploy.peer_node/0`**: Get the active peer's node name from the parent (useful for remsh)
+- **Configurable `shutdown_timeout`**: Control max time to wait for the outgoing peer to shut down before force-killing. `nil` (default) waits indefinitely.
+
 ## 0.2.5 (2026-01-29)
 - Log specific process info for processes timing out on suspend/resume
 

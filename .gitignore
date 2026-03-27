@@ -1,15 +1,16 @@
 # The directory Mix will write compiled artifacts to.
-/_build/
+_build/
 CLAUDE.md
 
 # If you run "mix test --cover", coverage assets end up here.
-/cover/
+cover/
 
+test_app/priv/deploy_test.txt
 # The directory Mix downloads your dependencies sources to.
-/deps/
+deps/
 
 # Where third-party dependencies like ExDoc output generated docs.
-/doc/
+doc/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
