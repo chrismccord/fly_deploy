@@ -279,8 +279,11 @@ defmodule FlyDeploy.Orchestrator do
     app_version = Application.spec(app, :vsn) |> to_string()
     tarball_path = Path.join(System.tmp_dir!(), "#{app}-#{app_version}.tar.gz")
 
-    # create marker file with upgrade info - this proves the upgrade was applied
-    marker_path = Path.join(System.tmp_dir!(), "fly_deploy_marker.json")
+    # create mode-specific marker file with upgrade info - this proves the upgrade was applied
+    # Using separate markers per mode prevents a hot deploy from invalidating the
+    # blue-green poller's "already applied" check (and vice versa)
+    marker_filename = "fly_deploy_marker_#{mode}.json"
+    marker_path = Path.join(System.tmp_dir!(), marker_filename)
 
     marker_content =
       Jason.encode!(%{
@@ -306,7 +309,7 @@ defmodule FlyDeploy.Orchestrator do
         {String.to_charlist(rel_path), String.to_charlist(path)}
       end)
 
-    marker_entry = {~c"fly_deploy_marker.json", String.to_charlist(marker_path)}
+    marker_entry = {String.to_charlist(marker_filename), String.to_charlist(marker_path)}
     files_to_tar = [marker_entry | files_to_tar]
 
     # Use :dereference so NIF .so symlinks (e.g. crypto.so -> erts-*/lib/...)

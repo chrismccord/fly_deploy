@@ -306,7 +306,7 @@ defmodule FlyDeploy.Poller do
 
   defp init_current_vsn do
     base_image_ref = System.get_env("FLY_IMAGE_REF")
-    local_marker = read_local_marker()
+    local_marker = read_local_marker(:hot)
 
     {hot_ref, version} =
       if local_marker do
@@ -354,7 +354,7 @@ defmodule FlyDeploy.Poller do
   end
 
   defp maybe_apply_upgrade(state, current) do
-    local_marker = read_local_marker()
+    local_marker = read_local_marker(state.mode)
     my_image_ref = System.get_env("FLY_IMAGE_REF")
     base_image_ref = Map.get(current, "image_ref")
 
@@ -646,8 +646,8 @@ defmodule FlyDeploy.Poller do
     end)
   end
 
-  defp read_local_marker do
-    marker_path = "/app/fly_deploy_marker.json"
+  defp read_local_marker(mode) do
+    marker_path = "/app/fly_deploy_marker_#{mode}.json"
 
     case File.read(marker_path) do
       {:ok, content} ->

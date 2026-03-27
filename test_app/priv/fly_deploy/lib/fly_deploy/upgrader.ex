@@ -93,11 +93,8 @@ defmodule FlyDeploy.Upgrader do
     File.mkdir_p!(upgrade_dir)
     :ok = :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
-    # Copy marker file to /app to prove upgrade was applied on this machine
-    marker_src = Path.join(upgrade_dir, "fly_deploy_marker.json")
-    marker_dest = "/app/fly_deploy_marker.json"
-    File.cp!(marker_src, marker_dest)
-    Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
+    # Copy mode-specific marker file(s) to /app to prove upgrade was applied
+    copy_marker_files(upgrade_dir)
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
@@ -325,11 +322,8 @@ defmodule FlyDeploy.Upgrader do
     File.mkdir_p!(upgrade_dir)
     :ok = :erl_tar.extract(~c"#{tmp_file_path}", [:compressed, {:cwd, ~c"#{upgrade_dir}"}])
 
-    # Copy marker file to /app to prove upgrade was applied on this machine
-    marker_src = Path.join(upgrade_dir, "fly_deploy_marker.json")
-    marker_dest = "/app/fly_deploy_marker.json"
-    File.cp!(marker_src, marker_dest)
-    Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
+    # Copy mode-specific marker file(s) to /app to prove upgrade was applied
+    copy_marker_files(upgrade_dir)
 
     # copy beam files to loaded paths (only if MD5 differs)
     # Only check app-specific beam files to avoid unnecessary MD5 comparisons on dependencies
@@ -917,6 +911,20 @@ defmodule FlyDeploy.Upgrader do
       nil ->
         Logger.info("[#{inspect(__MODULE__)}] No application module found for #{app}")
     end
+  end
+
+  # Copy mode-specific marker files from extracted tarball to /app.
+  # Tarballs contain fly_deploy_marker_{mode}.json (e.g. fly_deploy_marker_hot.json).
+  # Also handles legacy fly_deploy_marker.json for backwards compatibility.
+  defp copy_marker_files(upgrade_dir) do
+    markers = Path.wildcard(Path.join(upgrade_dir, "fly_deploy_marker*.json"))
+
+    Enum.each(markers, fn marker_src ->
+      filename = Path.basename(marker_src)
+      marker_dest = "/app/#{filename}"
+      File.cp!(marker_src, marker_dest)
+      Logger.info("[#{inspect(__MODULE__)}] Copied upgrade marker to #{marker_dest}")
+    end)
   end
 
   # Log detailed process info when suspend/resume fails to help debug stuck processes

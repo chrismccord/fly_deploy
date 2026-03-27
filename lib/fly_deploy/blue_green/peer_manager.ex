@@ -299,7 +299,20 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     peer_opts = Keyword.put(peer_opts, :endpoint, state.endpoint)
 
     start_time = System.monotonic_time(:millisecond)
-    {peer_pid, peer_node} = start_peer(otp_app, code_paths, peer_opts)
+
+    {peer_pid, peer_node} =
+      try do
+        start_peer(otp_app, code_paths, peer_opts)
+      rescue
+        e ->
+          Logger.error(
+            "[BlueGreen.PeerManager] Initial peer failed to start: #{Exception.message(e)}. " <>
+              "Halting to trigger machine restart."
+          )
+
+          System.halt(1)
+      end
+
     elapsed = System.monotonic_time(:millisecond) - start_time
 
     ref = Process.monitor(peer_pid)
@@ -528,13 +541,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
         File.mkdir_p!(tmp_dir)
         :ok = :erl_tar.extract(~c"#{tmp_file}", [:compressed, {:cwd, ~c"#{tmp_dir}"}])
 
-        # Copy marker file
-        marker_src = Path.join(tmp_dir, "fly_deploy_marker.json")
-        marker_dest = "/app/fly_deploy_marker.json"
-
-        if File.exists?(marker_src) do
+        # Copy mode-specific marker file(s)
+        Path.wildcard(Path.join(tmp_dir, "fly_deploy_marker*.json"))
+        |> Enum.each(fn marker_src ->
+          marker_dest = "/app/#{Path.basename(marker_src)}"
           File.cp!(marker_src, marker_dest)
-        end
+        end)
 
         # Build code paths from extracted tarball
         new_ebin_paths = Path.wildcard(Path.join([tmp_dir, "lib", "*", "ebin"]))
