@@ -118,7 +118,7 @@ fly secrets set AWS_ACCESS_KEY_ID=<key> AWS_SECRET_ACCESS_KEY=<secret>
 You will also need to set a secret on the app of the Fly API token for the orchestrator machine:
 
 ```bash
-fly secrets set FLY_API_TOKEN=$(fly tokens create machine-exec)
+fly secrets set FLY_API_TOKEN="$(fly tokens create machine-exec)"
 ```
 
 ### 2. Add Startup Hook
