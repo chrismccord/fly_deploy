@@ -89,25 +89,24 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
   @max_orchestrator_launch_retries 5
 
+  @switches [
+    config: :string,
+    skip_build: :boolean,
+    dry_run: :boolean,
+    cache: :boolean,
+    image: :string,
+    build_arg: :keep,
+    max_concurrency: :integer,
+    timeout: :integer,
+    force: :boolean,
+    lock_timeout: :integer,
+    buildkit: :boolean,
+    mode: :string
+  ]
+
   @impl Mix.Task
   def run(args) do
-    {opts, _remaining, _invalid} =
-      OptionParser.parse(args,
-        strict: [
-          config: :string,
-          skip_build: :boolean,
-          dry_run: :boolean,
-          cache: :boolean,
-          image: :string,
-          build_arg: :keep,
-          max_concurrency: :integer,
-          timeout: :integer,
-          force: :boolean,
-          lock_timeout: :integer,
-          buildkit: :boolean,
-          mode: :string
-        ]
-      )
+    opts = parse_opts!(args)
 
     # Normalize mode to atom
     opts =
@@ -200,6 +199,12 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     IO.puts("")
     IO.puts(IO.ANSI.format([:green, :bright, "==> Hot deployment complete!"]))
     IO.puts("")
+  end
+
+  @doc false
+  def parse_opts!(args) do
+    {opts, _remaining} = OptionParser.parse!(args, strict: @switches)
+    opts
   end
 
   @doc false

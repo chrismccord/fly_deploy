@@ -24,4 +24,15 @@ defmodule Mix.Tasks.FlyDeploy.HotTest do
       assert Hot.build_image_args(@config, buildkit: true) == @base_args ++ ["--buildkit"]
     end
   end
+
+  describe "parse_opts!/1" do
+    test "parses known switches" do
+      assert Hot.parse_opts!(["--dry-run", "--config", "fly-staging.toml"]) ==
+               [dry_run: true, config: "fly-staging.toml"]
+    end
+
+    test "raises on unknown switches" do
+      assert_raise OptionParser.ParseError, fn -> Hot.parse_opts!(["--bogus"]) end
+    end
+  end
 end
