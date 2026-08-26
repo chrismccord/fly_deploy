@@ -1,4 +1,4 @@
-## Unreleased
+## 0.4.3 (2026-08-26)
 
 ### Enhancements
 - Support `--no-depot` flag to opt out of Depot builders (forwarded to `fly deploy` as `--depot=false`)
