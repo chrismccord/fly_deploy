@@ -202,26 +202,28 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     IO.puts("")
   end
 
+  @doc false
+  def build_image_args(config, opts) do
+    ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config] ++
+      build_arg_flags(opts) ++ cache_flags(opts) ++ buildkit_flags(opts)
+  end
+
+  defp build_arg_flags(opts) do
+    opts |> Keyword.get_values(:build_arg) |> Enum.flat_map(&["--build-arg", &1])
+  end
+
+  defp cache_flags(opts) do
+    if opts[:cache] == false, do: ["--no-cache"], else: []
+  end
+
+  defp buildkit_flags(opts) do
+    if opts[:buildkit], do: ["--buildkit"], else: []
+  end
+
   defp build_image(config, opts) do
     IO.puts(IO.ANSI.format([:yellow, "--> Building Docker image"]))
 
-    # Build args list for fly deploy
-    base_args = ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config]
-
-    cache_args =
-      if opts[:cache] == false do
-        ["--no-cache"]
-      else
-        []
-      end
-
-    # Add --build-arg flags if provided
-    build_args = Keyword.get_values(opts, :build_arg)
-    build_arg_flags = Enum.flat_map(build_args, fn arg -> ["--build-arg", arg] end)
-
-    all_args =
-      base_args ++
-        build_arg_flags ++ cache_args ++ if(opts[:buildkit], do: ["--buildkit"], else: [])
+    all_args = build_image_args(config, opts)
 
     # Run fly deploy --build-only to create the image
     # Use Port to stream output in real-time while capturing it
