@@ -1,3 +1,9 @@
+## Unreleased
+
+### Enhancements
+- Support `--no-depot` flag to opt out of Depot builders (forwarded to `fly deploy` as `--depot=false`)
+- Fail on invalid CLI options instead of silently dropping them
+
 ## 0.4.2 (2026-03-27)
 
 ### Bug Fixes

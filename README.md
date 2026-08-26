@@ -239,9 +239,14 @@ The `mix fly_deploy.hot` task supports several options:
 - `--config` - Path to fly.toml file (default: "fly.toml")
 - `--skip-build` - Skip building and use existing image (requires `--image`)
 - `--image` - Use specific pre-built image
+- `--build-arg` - Pass build-time variables to Docker (can be used multiple times)
 - `--dry-run` - Show what would be done without executing
+- `--no-cache` - Do not use previously cached builder docker layers
 - `--force` - Override deployment lock (use with caution)
 - `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
+- `--buildkit` - Use buildkit based Fly builder
+- `--no-depot` - Build with a classic remote builder instead of Depot (forwards `--depot=false` to `fly deploy`)
+- `--mode` - Upgrade mode: "hot" (default) or "blue_green"
 
 ### Examples
 
