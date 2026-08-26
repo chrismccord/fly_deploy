@@ -52,6 +52,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * `--no-cache` - Do not use previously cached builder docker layers
     * `--force` - Override deployment lock (use with caution)
     * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
+    * `--max-concurrency` - Max concurrent machine upgrades (default: 20)
+    * `--timeout` - Timeout for machine upgrade operations in ms (default: 60000)
     * `--buildkit` - Use buildkit based Fly builder
     * `--no-depot` - Build with a classic remote builder instead of Depot (forwards `--depot=false` to `fly deploy`)
     * `--mode` - Upgrade mode: "hot" (default) or "blue_green"
