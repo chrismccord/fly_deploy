@@ -205,8 +205,10 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
   @doc false
   def parse_opts!(args) do
-    {opts, _remaining} = OptionParser.parse!(args, strict: @switches)
-    opts
+    case OptionParser.parse!(args, strict: @switches) do
+      {opts, []} -> opts
+      {_opts, unexpected} -> Mix.raise("Unexpected arguments: #{Enum.join(unexpected, " ")}")
+    end
   end
 
   @doc false

@@ -44,6 +44,10 @@ defmodule Mix.Tasks.FlyDeploy.HotTest do
       assert_raise OptionParser.ParseError, fn -> Hot.parse_opts!(["--bogus"]) end
     end
 
+    test "raises on unexpected positional arguments" do
+      assert_raise Mix.Error, fn -> Hot.parse_opts!(["no-depot"]) end
+    end
+
     test "parses --no-depot as depot: false" do
       assert Hot.parse_opts!(["--no-depot"]) == [depot: false]
     end
