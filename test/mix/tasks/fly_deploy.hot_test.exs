@@ -23,6 +23,15 @@ defmodule Mix.Tasks.FlyDeploy.HotTest do
     test "appends --buildkit when requested" do
       assert Hot.build_image_args(@config, buildkit: true) == @base_args ++ ["--buildkit"]
     end
+
+    test "forwards depot as --depot=<value>" do
+      assert Hot.build_image_args(@config, depot: false) == @base_args ++ ["--depot=false"]
+      assert Hot.build_image_args(@config, depot: true) == @base_args ++ ["--depot=true"]
+    end
+
+    test "omits --depot when not given" do
+      refute Enum.any?(Hot.build_image_args(@config, []), &String.starts_with?(&1, "--depot"))
+    end
   end
 
   describe "parse_opts!/1" do
@@ -33,6 +42,18 @@ defmodule Mix.Tasks.FlyDeploy.HotTest do
 
     test "raises on unknown switches" do
       assert_raise OptionParser.ParseError, fn -> Hot.parse_opts!(["--bogus"]) end
+    end
+
+    test "parses --no-depot as depot: false" do
+      assert Hot.parse_opts!(["--no-depot"]) == [depot: false]
+    end
+
+    test "parses bare --depot as depot: true, matching flyctl" do
+      assert Hot.parse_opts!(["--depot"]) == [depot: true]
+    end
+
+    test "parses the flyctl spelling --depot=false" do
+      assert Hot.parse_opts!(["--depot=false"]) == [depot: false]
     end
   end
 end

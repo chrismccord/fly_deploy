@@ -53,6 +53,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * `--force` - Override deployment lock (use with caution)
     * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
     * `--buildkit` - Use buildkit based Fly builder
+    * `--no-depot` - Build with a classic remote builder instead of Depot (forwards `--depot=false` to `fly deploy`)
     * `--mode` - Upgrade mode: "hot" (default) or "blue_green"
 
   ## Required Setup
@@ -101,6 +102,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     force: :boolean,
     lock_timeout: :integer,
     buildkit: :boolean,
+    depot: :boolean,
     mode: :string
   ]
 
@@ -210,7 +212,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
   @doc false
   def build_image_args(config, opts) do
     ["deploy", "--build-only", "--push", "--remote-only", "-c", config.fly_config] ++
-      build_arg_flags(opts) ++ cache_flags(opts) ++ buildkit_flags(opts)
+      build_arg_flags(opts) ++ cache_flags(opts) ++ buildkit_flags(opts) ++ depot_flags(opts)
   end
 
   defp build_arg_flags(opts) do
@@ -223,6 +225,13 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
   defp buildkit_flags(opts) do
     if opts[:buildkit], do: ["--buildkit"], else: []
+  end
+
+  defp depot_flags(opts) do
+    case opts[:depot] do
+      nil -> []
+      value -> ["--depot=#{value}"]
+    end
   end
 
   defp build_image(config, opts) do
