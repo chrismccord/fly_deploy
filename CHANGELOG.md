@@ -1,3 +1,8 @@
+## Unreleased
+
+### Bug Fixes
+- Blue-green: trap exits in `PeerManager` so `terminate/2` runs when the parent node shuts down (SIGTERM, `fly machine stop`, cold deploy). Previously the supervisor's exit signal killed PeerManager before it could send `:init.stop()` to the peer, so the peer was halted without running the app's shutdown callbacks (no Endpoint drain, no `terminate/2` on user processes).
+
 ## 0.4.3 (2026-08-26)
 
 ### Enhancements

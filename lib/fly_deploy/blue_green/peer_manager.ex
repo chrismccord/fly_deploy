@@ -228,7 +228,8 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   # shutdown of 5_000ms is too short — when the BlueGreen.Supervisor shuts
   # down (machine restart, cold deploy), PeerManager needs time to gracefully
   # stop the active peer. We let the peer's own supervision tree timeouts
-  # govern how long that takes.
+  # govern how long that takes. This only matters because init/1 traps exits;
+  # otherwise terminate/2 would never run and the peer would be halted.
   def child_spec(opts) do
     %{
       id: __MODULE__,
@@ -275,6 +276,17 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   @impl true
   def init(opts) do
+    # Trap exits so the supervisor's shutdown signal (machine stop, SIGTERM,
+    # cold deploy) is delivered as a message and terminate/2 runs. Without
+    # this the exit signal kills PeerManager outright, terminate/2 never sends
+    # :init.stop() to the peer, and the peer is halted by its control process
+    # (or leaked) before any of the app's shutdown callbacks run.
+    #
+    # PeerManager links to nothing besides its supervisor: the peer control
+    # process is started with :peer.start/1 (unlinked) and after_cutover runs
+    # under a Task.Supervisor. So the only EXIT it can receive is the parent's.
+    Process.flag(:trap_exit, true)
+
     :ets.new(@handoff_table, [:named_table, :public, :set, write_concurrency: true])
 
     otp_app = Keyword.fetch!(opts, :otp_app)
