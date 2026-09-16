@@ -62,7 +62,9 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
     * Fly CLI must be authenticated: `fly auth login`
     * App secrets must include `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for Tigris/S3
-    * App secrets must include `FLY_API_TOKEN` (used by orchestrator machine)
+
+  The local Fly CLI mints a one-hour, app-scoped machine-exec token for the
+  temporary orchestrator. You do not need to store `FLY_API_TOKEN` as an app secret.
 
   ## How It Works
 
@@ -325,6 +327,22 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
   defp execute_orchestrated_upgrade(config, image_ref, opts, locked_by) do
     IO.puts(IO.ANSI.format([:yellow, "--> Launching orchestrator"]))
 
+    api_token =
+      case FlyDeploy.Flyctl.machine_exec_token(config.fly_config) do
+        {:ok, token} ->
+          token
+
+        {:error, :empty_token} ->
+          Mix.raise(
+            "`fly tokens create machine-exec` returned an empty token. Run `fly auth login` and try again"
+          )
+
+        {:error, {:exit_status, status}} ->
+          Mix.raise(
+            "Could not create an app-scoped API token with flyctl (exit #{status}). Run `fly auth login` and try again"
+          )
+      end
+
     # Build env var flags from config.env (these come from fly.toml [env] and Mix config)
     env_flags =
       Enum.flat_map(config.env, fn {key, value} ->
@@ -355,6 +373,10 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
     config_env_flags = List.flatten(config_env_flags)
 
+    # flyctl refreshes any required macaroon discharges before minting this token.
+    # Use an internal key so a legacy FLY_API_TOKEN app secret cannot override it.
+    auth_env_flags = ["-e", "FLY_DEPLOY_API_TOKEN=#{api_token}"]
+
     # Build eval command with config values
     # Pass the OTP app and image_ref so we can track deployment metadata
     eval_command =
@@ -381,6 +403,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
       ] ++
         env_flags ++
         config_env_flags ++
+        auth_env_flags ++
         [
           "--rm",
           "--shell",

@@ -51,8 +51,11 @@ defmodule FlyDeploy do
   For Orchestrator Machine:
   - `AWS_ACCESS_KEY_ID` - Tigris/S3 access key (for uploading tarballs and metadata)
   - `AWS_SECRET_ACCESS_KEY` - Tigris/S3 secret key
-  - `FLY_API_TOKEN` - Fly API token (for listing machines and triggering RPC)
   - `FLY_APP_NAME` - Application name (auto-set by Fly)
+
+  `mix fly_deploy.hot` uses the local Fly CLI to mint a one-hour, app-scoped
+  machine-exec token for the temporary orchestrator. `FLY_API_TOKEN` does not need
+  to be stored as an app secret.
 
   Optional:
   - `AWS_ENDPOINT_URL_S3` - S3 endpoint (defaults to `https://t3.storage.dev`)
@@ -62,9 +65,6 @@ defmodule FlyDeploy do
 
       # Required for all machines (set automatically if you run `fly storage create`)
       fly secrets set AWS_ACCESS_KEY_ID=<key> AWS_SECRET_ACCESS_KEY=<secret>
-
-      # Required for orchestrator (usually auto-available)
-      fly secrets set FLY_API_TOKEN=$(fly tokens create machine-exec)
 
   ### Custom AWS Credentials
 
