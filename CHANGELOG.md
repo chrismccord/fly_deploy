@@ -1,3 +1,11 @@
+## Unreleased
+
+### Bug Fixes
+- `FlyDeploy.Components.hot_reload_css`: the element `id` used an EEx-style `"...#{@asset}"` interpolation inside a quoted HEEx attribute, which is not interpolated — every instance rendered the literal id `fly-deploy-css-reload-#{@asset}`, so two instances (different `:asset`) on one page collided. Switched to `id={"...#{@asset}"}`.
+
+### Enhancements
+- `FlyDeploy.Components.hot_reload_css` accepts a `:nonce` attribute, applied to the runtime hook's inline `<script>`. This lets the component work under a strict Content-Security-Policy (`script-src` without `'unsafe-inline'`), which otherwise blocks the inline script. Defaults to `nil` (no attribute emitted) — no change for existing users.
+
 ## 0.4.3 (2026-08-26)
 
 ### Enhancements
