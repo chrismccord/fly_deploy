@@ -6,6 +6,12 @@
 ### Enhancements
 - `FlyDeploy.Components.hot_reload_css` accepts a `:nonce` attribute, applied to the runtime hook's inline `<script>`. This lets the component work under a strict Content-Security-Policy (`script-src` without `'unsafe-inline'`), which otherwise blocks the inline script. Defaults to `nil` (no attribute emitted) — no change for existing users.
 
+## 0.4.3 (2026-08-26)
+
+### Enhancements
+- Support `--no-depot` flag to opt out of Depot builders (forwarded to `fly deploy` as `--depot=false`)
+- Fail on invalid CLI options instead of silently dropping them
+
 ## 0.4.2 (2026-03-27)
 
 ### Bug Fixes
