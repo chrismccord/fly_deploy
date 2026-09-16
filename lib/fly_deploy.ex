@@ -53,8 +53,9 @@ defmodule FlyDeploy do
   - `AWS_SECRET_ACCESS_KEY` - Tigris/S3 secret key
   - `FLY_APP_NAME` - Application name (auto-set by Fly)
 
-  `mix fly_deploy.hot` uses the local Fly CLI to mint a one-hour, app-scoped
-  machine-exec token for the temporary orchestrator. `FLY_API_TOKEN` does not need
+  With a local user session, `mix fly_deploy.hot` uses flyctl to mint a one-hour,
+  app-scoped machine-exec token for the temporary orchestrator. An explicitly
+  supplied `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` is reused instead. Neither needs
   to be stored as an app secret.
 
   Optional:

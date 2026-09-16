@@ -60,11 +60,12 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
   ## Required Setup
 
-    * Fly CLI must be authenticated: `fly auth login`
+    * Fly CLI must be authenticated with `fly auth login`, `FLY_API_TOKEN`, or `FLY_ACCESS_TOKEN`
     * App secrets must include `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for Tigris/S3
 
-  The local Fly CLI mints a one-hour, app-scoped machine-exec token for the
-  temporary orchestrator. You do not need to store `FLY_API_TOKEN` as an app secret.
+  With a local user session, flyctl mints a one-hour, app-scoped machine-exec token
+  for the temporary orchestrator. An explicitly supplied `FLY_API_TOKEN` or
+  `FLY_ACCESS_TOKEN` is reused instead. Neither needs to be stored as an app secret.
 
   ## How It Works
 
@@ -328,19 +329,15 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     IO.puts(IO.ANSI.format([:yellow, "--> Launching orchestrator"]))
 
     api_token =
-      case FlyDeploy.Flyctl.machine_exec_token(config.fly_config) do
+      case FlyDeploy.Flyctl.orchestrator_token(config.fly_config) do
         {:ok, token} ->
           token
 
         {:error, :empty_token} ->
-          Mix.raise(
-            "`fly tokens create machine-exec` returned an empty token. Run `fly auth login` and try again"
-          )
+          Mix.raise("flyctl returned an empty API token")
 
         {:error, {:exit_status, status}} ->
-          Mix.raise(
-            "Could not create an app-scoped API token with flyctl (exit #{status}). Run `fly auth login` and try again"
-          )
+          Mix.raise("Could not get an orchestrator API token from flyctl (exit #{status})")
       end
 
     # Build env var flags from config.env (these come from fly.toml [env] and Mix config)
@@ -373,7 +370,7 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
     config_env_flags = List.flatten(config_env_flags)
 
-    # flyctl refreshes any required macaroon discharges before minting this token.
+    # flyctl refreshes any required macaroon discharges before returning this token.
     # Use an internal key so a legacy FLY_API_TOKEN app secret cannot override it.
     auth_env_flags = ["-e", "FLY_DEPLOY_API_TOKEN=#{api_token}"]
 

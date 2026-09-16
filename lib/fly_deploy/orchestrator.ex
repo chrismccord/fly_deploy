@@ -506,8 +506,8 @@ defmodule FlyDeploy.Orchestrator do
     IO.puts(ansi([:yellow], "--> Waiting for machines to upgrade"))
 
     # get machines from Fly API
-    # The Mix task supplies a short-lived, app-scoped token. Keep FLY_API_TOKEN as a
-    # fallback for callers that invoke the orchestrator directly.
+    # The Mix task supplies the resolved token. Keep FLY_API_TOKEN as a fallback
+    # for callers that invoke the orchestrator directly.
     api_token =
       System.get_env("FLY_DEPLOY_API_TOKEN") ||
         System.fetch_env!("FLY_API_TOKEN")

@@ -115,9 +115,11 @@ Or for existing credentials:
 fly secrets set AWS_ACCESS_KEY_ID=<key> AWS_SECRET_ACCESS_KEY=<secret>
 ```
 
-The Fly CLI must be authenticated locally with `fly auth login`. FlyDeploy asks
-flyctl to mint a one-hour, app-scoped machine-exec token when it launches the
-temporary orchestrator; you do not need to store `FLY_API_TOKEN` as an app secret.
+Authenticate the Fly CLI with `fly auth login`, `FLY_API_TOKEN`, or
+`FLY_ACCESS_TOKEN`. With a user login, FlyDeploy asks flyctl to mint a one-hour,
+app-scoped machine-exec token when it launches the temporary orchestrator. An
+explicitly supplied automation token is refreshed and reused instead. You do not
+need to store either token as an app secret.
 
 ### 2. Add Startup Hook
 
