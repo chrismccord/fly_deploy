@@ -22,7 +22,7 @@ defmodule FlyDeploy.BlueGreenE2ETest do
   Requirements:
   - test/fly_deploy/test_app must be set up with Fly app
   - AWS credentials must be configured in Fly secrets
-  - FLY_API_TOKEN must be set in secrets
+  - Fly CLI must be authenticated locally
   """
 
   use ExUnit.Case, async: false

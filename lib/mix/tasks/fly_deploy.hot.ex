@@ -60,9 +60,12 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
 
   ## Required Setup
 
-    * Fly CLI must be authenticated: `fly auth login`
+    * Fly CLI must be authenticated with `fly auth login`, `FLY_API_TOKEN`, or `FLY_ACCESS_TOKEN`
     * App secrets must include `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for Tigris/S3
-    * App secrets must include `FLY_API_TOKEN` (used by orchestrator machine)
+
+  Flyctl lists the target machines locally before launching the temporary
+  orchestrator. Only machine IDs and regions are forwarded, not API tokens.
+  You do not need to store a Fly API token as an app secret.
 
   ## How It Works
 
@@ -325,6 +328,15 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
   defp execute_orchestrated_upgrade(config, image_ref, opts, locked_by) do
     IO.puts(IO.ANSI.format([:yellow, "--> Launching orchestrator"]))
 
+    machine_regions =
+      case FlyDeploy.Flyctl.machine_regions(config.fly_config) do
+        {:ok, regions} ->
+          regions
+
+        {:error, {:exit_status, status}} ->
+          Mix.raise("Could not list machines with flyctl (exit #{status})")
+      end
+
     # Build env var flags from config.env (these come from fly.toml [env] and Mix config)
     env_flags =
       Enum.flat_map(config.env, fn {key, value} ->
@@ -340,7 +352,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         ["-e", "DEPLOY_MAX_CONCURRENCY=#{config.max_concurrency}"],
         ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"],
         ["-e", "DEPLOY_SUSPEND_TIMEOUT=#{config.suspend_timeout}"],
-        ["-e", "DEPLOY_MODE=#{config.mode || :hot}"]
+        ["-e", "DEPLOY_MODE=#{config.mode || :hot}"],
+        ["-e", "FLY_DEPLOY_MACHINE_REGIONS=#{Jason.encode!(machine_regions)}"]
       ] ++
         if opts[:force] do
           [["-e", "DEPLOY_FORCE=true"]]
