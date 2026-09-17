@@ -1,6 +1,7 @@
 ## Unreleased
 
 ### Bug Fixes
+- Blue-green: trap exits in `PeerManager` so `terminate/2` runs when the parent node shuts down (SIGTERM, `fly machine stop`, cold deploy). Previously the supervisor's exit signal killed PeerManager before it could send `:init.stop()` to the peer, so the peer was halted without running the app's shutdown callbacks (no Endpoint drain, no `terminate/2` on user processes).
 - `FlyDeploy.Components.hot_reload_css`: the element `id` used an EEx-style `"...#{@asset}"` interpolation inside a quoted HEEx attribute, which is not interpolated — every instance rendered the literal id `fly-deploy-css-reload-#{@asset}`, so two instances (different `:asset`) on one page collided. Switched to `id={"...#{@asset}"}`.
 
 ### Enhancements
