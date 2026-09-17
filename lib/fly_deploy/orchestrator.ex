@@ -505,50 +505,43 @@ defmodule FlyDeploy.Orchestrator do
   defp wait_for_machine_upgrades(app, upgrade_id, bucket, timeout) do
     IO.puts(ansi([:yellow], "--> Waiting for machines to upgrade"))
 
-    # get machines from Fly API
-    # The Mix task supplies the resolved token. Keep FLY_API_TOKEN as a fallback
-    # for callers that invoke the orchestrator directly.
-    api_token =
-      System.get_env("FLY_DEPLOY_API_TOKEN") ||
-        System.fetch_env!("FLY_API_TOKEN")
-
-    app_name = System.fetch_env!("FLY_APP_NAME")
-
-    machines_response =
-      Req.get!("https://api.machines.dev/v1/apps/#{app_name}/machines",
-        receive_timeout: 30_000,
-        connect_options: [timeout: 30_000],
-        headers: [
-          {"authorization", "Bearer #{api_token}"},
-          {"content-type", "application/json"}
-        ]
-      )
-
-    machines =
-      machines_response.body
-      |> Enum.filter(&(&1["state"] == "started" && !(&1["config"]["services"] in [nil, []])))
+    machine_regions = machine_regions()
 
     # Show which machines we're waiting for
-    IO.puts("    Found #{length(machines)} machines:")
+    IO.puts("    Found #{map_size(machine_regions)} machines:")
 
-    Enum.each(machines, fn machine ->
-      machine_id = String.slice(machine["id"], 0, 14)
-      region = machine["region"]
-      IO.puts("      • #{machine_id} (#{region})")
+    Enum.each(machine_regions, fn {machine_id, region} ->
+      IO.puts("      • #{String.slice(machine_id, 0, 14)} (#{region})")
     end)
 
     IO.puts("")
-
-    # Build a map of machine_id -> region for display
-    machine_regions =
-      machines
-      |> Enum.map(fn m -> {m["id"], m["region"]} end)
-      |> Map.new()
 
     expected_machine_ids = Map.keys(machine_regions)
 
     # Poll S3 for results until all machines report or timeout
     poll_for_results(app, upgrade_id, bucket, expected_machine_ids, machine_regions, timeout)
+  end
+
+  @doc false
+  def machine_regions do
+    case System.get_env("FLY_DEPLOY_MACHINE_REGIONS") do
+      nil ->
+        # Compatibility for callers that invoke the orchestrator directly.
+        api_token = System.fetch_env!("FLY_API_TOKEN")
+        app_name = System.fetch_env!("FLY_APP_NAME")
+
+        %{status: 200, body: machines} =
+          Req.get!("https://api.machines.dev/v1/apps/#{app_name}/machines",
+            receive_timeout: 30_000,
+            connect_options: [timeout: 30_000],
+            headers: [{"authorization", "Bearer #{api_token}"}]
+          )
+
+        FlyDeploy.Flyctl.serving_machine_regions(machines)
+
+      json ->
+        Jason.decode!(json)
+    end
   end
 
   defp poll_for_results(app, upgrade_id, bucket, expected_ids, machine_regions, timeout) do

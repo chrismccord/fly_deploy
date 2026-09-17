@@ -1,3 +1,10 @@
+## Unreleased
+
+### Enhancements
+- List target Machines through the authenticated local flyctl session, handling macaroon discharges without requiring a `FLY_API_TOKEN` app secret.
+- Pass only Machine IDs and regions to temporary orchestrators, keeping local and CI API tokens out of Machine configuration. Direct `FlyDeploy.orchestrate/1` callers retain the `FLY_API_TOKEN` fallback.
+- Explicitly request JSON for machine discovery so flyctl's default output format does not affect deployments.
+
 ## 0.4.3 (2026-08-26)
 
 ### Enhancements

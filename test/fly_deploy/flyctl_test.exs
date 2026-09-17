@@ -3,61 +3,51 @@ defmodule FlyDeploy.FlyctlTest do
 
   alias FlyDeploy.Flyctl
 
-  test "orchestrator_token mints an app-scoped token for a local user session" do
+  test "machine_regions uses the selected config and explicitly requests JSON" do
     runner = fn executable, args, options ->
       assert executable == "fly"
-
-      assert args == [
-               "tokens",
-               "create",
-               "machine-exec",
-               "--config",
-               "fly-staging.toml",
-               "--expiry",
-               "1h",
-               "--command",
-               "/bin/false",
-               "--name",
-               "fly_deploy orchestrator"
-             ]
-
+      assert args == ["machine", "list", "--config", "fly-staging.toml", "--json"]
       assert options == []
 
-      {"  FlyV1 fm2_permission,fm2_discharge\n", 0}
+      {Jason.encode!([
+         %{
+           id: "web",
+           region: "ord",
+           state: "started",
+           config: %{services: [%{internal_port: 4000}], env: %{PRIVATE_VALUE: "not-forwarded"}}
+         },
+         %{id: "stopped", region: "ord", state: "stopped", config: %{services: [%{}]}},
+         %{id: "worker", region: "ord", state: "started", config: %{services: []}},
+         %{id: "orchestrator", region: "ord", state: "started", config: %{}}
+       ]), 0}
     end
 
-    assert {:ok, "fm2_permission,fm2_discharge"} =
-             Flyctl.orchestrator_token("fly-staging.toml", runner, fn _name -> nil end)
+    assert {:ok, %{"web" => "ord"}} = Flyctl.machine_regions("fly-staging.toml", runner)
   end
 
-  test "orchestrator_token refreshes an explicitly supplied automation token" do
-    runner = fn "fly", args, [] ->
-      assert args == ["auth", "token", "--quiet"]
-      {"FlyV1 fm2_permission,fm2_discharge\n", 0}
-    end
+  test "machine_regions accepts an empty machine list" do
+    runner = fn "fly", _args, [] -> {"[]", 0} end
 
-    env_reader = fn
-      "FLY_ACCESS_TOKEN" -> "configured"
-      _name -> nil
-    end
-
-    assert {:ok, "fm2_permission,fm2_discharge"} =
-             Flyctl.orchestrator_token("fly.toml", runner, env_reader)
+    assert {:ok, %{}} = Flyctl.machine_regions("fly.toml", runner)
   end
 
-  test "orchestrator_token rejects an empty successful response" do
-    runner = fn "fly", _args, [] -> {"\n", 0} end
+  test "machine_regions fails on malformed JSON instead of treating it as an empty list" do
+    runner = fn "fly", _args, [] -> {"not JSON", 0} end
 
-    assert {:error, :empty_token} =
-             Flyctl.orchestrator_token("fly.toml", runner, fn _name -> nil end)
+    assert_raise Jason.DecodeError, fn -> Flyctl.machine_regions("fly.toml", runner) end
   end
 
-  test "orchestrator_token returns the flyctl exit status without exposing its output" do
+  test "machine_regions rejects a non-list JSON response" do
+    runner = fn "fly", _args, [] -> {~s({"error":"unauthorized"}), 0} end
+
+    assert_raise FunctionClauseError, fn -> Flyctl.machine_regions("fly.toml", runner) end
+  end
+
+  test "machine_regions returns the flyctl exit status without exposing its output" do
     runner = fn "fly", _args, [] ->
       {"an error that could contain sensitive output", 7}
     end
 
-    assert {:error, {:exit_status, 7}} =
-             Flyctl.orchestrator_token("fly.toml", runner, fn _name -> nil end)
+    assert {:error, {:exit_status, 7}} = Flyctl.machine_regions("fly.toml", runner)
   end
 end

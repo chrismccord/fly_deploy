@@ -63,9 +63,9 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
     * Fly CLI must be authenticated with `fly auth login`, `FLY_API_TOKEN`, or `FLY_ACCESS_TOKEN`
     * App secrets must include `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for Tigris/S3
 
-  With a local user session, flyctl mints a one-hour, app-scoped machine-exec token
-  for the temporary orchestrator. An explicitly supplied `FLY_API_TOKEN` or
-  `FLY_ACCESS_TOKEN` is reused instead. Neither needs to be stored as an app secret.
+  Flyctl lists the target machines locally before launching the temporary
+  orchestrator. Only machine IDs and regions are forwarded, not API tokens.
+  You do not need to store a Fly API token as an app secret.
 
   ## How It Works
 
@@ -328,16 +328,13 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
   defp execute_orchestrated_upgrade(config, image_ref, opts, locked_by) do
     IO.puts(IO.ANSI.format([:yellow, "--> Launching orchestrator"]))
 
-    api_token =
-      case FlyDeploy.Flyctl.orchestrator_token(config.fly_config) do
-        {:ok, token} ->
-          token
-
-        {:error, :empty_token} ->
-          Mix.raise("flyctl returned an empty API token")
+    machine_regions =
+      case FlyDeploy.Flyctl.machine_regions(config.fly_config) do
+        {:ok, regions} ->
+          regions
 
         {:error, {:exit_status, status}} ->
-          Mix.raise("Could not get an orchestrator API token from flyctl (exit #{status})")
+          Mix.raise("Could not list machines with flyctl (exit #{status})")
       end
 
     # Build env var flags from config.env (these come from fly.toml [env] and Mix config)
@@ -355,7 +352,8 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         ["-e", "DEPLOY_MAX_CONCURRENCY=#{config.max_concurrency}"],
         ["-e", "DEPLOY_TIMEOUT=#{config.timeout}"],
         ["-e", "DEPLOY_SUSPEND_TIMEOUT=#{config.suspend_timeout}"],
-        ["-e", "DEPLOY_MODE=#{config.mode || :hot}"]
+        ["-e", "DEPLOY_MODE=#{config.mode || :hot}"],
+        ["-e", "FLY_DEPLOY_MACHINE_REGIONS=#{Jason.encode!(machine_regions)}"]
       ] ++
         if opts[:force] do
           [["-e", "DEPLOY_FORCE=true"]]
@@ -369,10 +367,6 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
         end
 
     config_env_flags = List.flatten(config_env_flags)
-
-    # flyctl refreshes any required macaroon discharges before returning this token.
-    # Use an internal key so a legacy FLY_API_TOKEN app secret cannot override it.
-    auth_env_flags = ["-e", "FLY_DEPLOY_API_TOKEN=#{api_token}"]
 
     # Build eval command with config values
     # Pass the OTP app and image_ref so we can track deployment metadata
@@ -400,7 +394,6 @@ defmodule Mix.Tasks.FlyDeploy.Hot do
       ] ++
         env_flags ++
         config_env_flags ++
-        auth_env_flags ++
         [
           "--rm",
           "--shell",

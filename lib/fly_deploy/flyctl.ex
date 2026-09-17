@@ -1,66 +1,26 @@
 defmodule FlyDeploy.Flyctl do
   @moduledoc false
 
-  @orchestrator_token_command "/bin/false"
-  @orchestrator_token_expiry "1h"
-  @orchestrator_token_name "fly_deploy orchestrator"
-  @token_env_vars ["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"]
-
   @type command_runner ::
           (String.t(), [String.t()], keyword() -> {String.t(), non_neg_integer()})
-  @type env_reader :: (String.t() -> String.t() | nil)
 
-  @spec orchestrator_token(String.t(), command_runner(), env_reader()) ::
-          {:ok, String.t()} | {:error, :empty_token | {:exit_status, non_neg_integer()}}
-  def orchestrator_token(
-        fly_config,
-        command_runner \\ &System.cmd/3,
-        env_reader \\ &System.get_env/1
-      ) do
-    args =
-      if externally_supplied_token?(env_reader) do
-        ["auth", "token", "--quiet"]
-      else
-        machine_exec_token_args(fly_config)
-      end
+  @spec machine_regions(String.t(), command_runner()) ::
+          {:ok, %{String.t() => String.t()}} | {:error, {:exit_status, non_neg_integer()}}
+  def machine_regions(fly_config, command_runner \\ &System.cmd/3) do
+    args = ["machine", "list", "--config", fly_config, "--json"]
 
     case command_runner.("fly", args, []) do
       {output, 0} ->
-        case normalize_token(output) do
-          "" -> {:error, :empty_token}
-          token -> {:ok, token}
-        end
+        {:ok, serving_machine_regions(Jason.decode!(output))}
 
       {_output, status} ->
         {:error, {:exit_status, status}}
     end
   end
 
-  defp externally_supplied_token?(env_reader) do
-    Enum.any?(@token_env_vars, fn name -> env_reader.(name) not in [nil, ""] end)
-  end
-
-  defp machine_exec_token_args(fly_config) do
-    [
-      "tokens",
-      "create",
-      "machine-exec",
-      "--config",
-      fly_config,
-      "--expiry",
-      @orchestrator_token_expiry,
-      # Without a command caveat, machine-exec tokens allow every command. The
-      # orchestrator only needs the token's read access to list app machines.
-      "--command",
-      @orchestrator_token_command,
-      "--name",
-      @orchestrator_token_name
-    ]
-  end
-
-  defp normalize_token(output) do
-    output
-    |> String.trim()
-    |> String.replace(~r/^(?:FlyV1|Bearer)\s+/i, "")
+  def serving_machine_regions(machines) when is_list(machines) do
+    machines
+    |> Enum.filter(&(&1["state"] == "started" && !(&1["config"]["services"] in [nil, []])))
+    |> Map.new(&{Map.fetch!(&1, "id"), Map.fetch!(&1, "region")})
   end
 end
