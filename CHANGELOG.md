@@ -5,6 +5,7 @@
 - `FlyDeploy.Components.hot_reload_css`: the element `id` used an EEx-style `"...#{@asset}"` interpolation inside a quoted HEEx attribute, which is not interpolated — every instance rendered the literal id `fly-deploy-css-reload-#{@asset}`, so two instances (different `:asset`) on one page collided. Switched to `id={"...#{@asset}"}`.
 
 ### Enhancements
+- Blue-green supports `endpoints: [MyAppWeb.Endpoint, MyAppWeb.InternalEndpoint]`, enabling port sharing for every listed Bandit HTTP listener on initial boot and upgrades. Existing `endpoint:` and conventional endpoint auto-detection remain supported; the two options cannot be combined. Cold deploy when adopting or changing the list so the parent and outgoing listeners use the new configuration.
 - `FlyDeploy.Components.hot_reload_css` accepts a `:nonce` attribute, applied to the runtime hook's inline `<script>`. This lets the component work under a strict Content-Security-Policy (`script-src` without `'unsafe-inline'`), which otherwise blocks the inline script. Defaults to `nil` (no attribute emitted) — no change for existing users.
 
 ## 0.4.3 (2026-08-26)
