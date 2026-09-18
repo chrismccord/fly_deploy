@@ -209,7 +209,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   defstruct [
     :otp_app,
-    :endpoint,
+    :endpoints,
     :shutdown_timeout,
     :before_cutover,
     :after_cutover,
@@ -290,14 +290,14 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     :ets.new(@handoff_table, [:named_table, :public, :set, write_concurrency: true])
 
     otp_app = Keyword.fetch!(opts, :otp_app)
-    endpoint = Keyword.get(opts, :endpoint)
+    endpoints = FlyDeploy.BlueGreen.configured_endpoints(opts)
     shutdown_timeout = Keyword.get(opts, :shutdown_timeout)
     before_cutover = Keyword.get(opts, :before_cutover)
     after_cutover = Keyword.get(opts, :after_cutover)
 
     state = %__MODULE__{
       otp_app: otp_app,
-      endpoint: endpoint || detect_endpoint(otp_app),
+      endpoints: endpoints || List.wrap(detect_endpoint(otp_app)),
       shutdown_timeout: shutdown_timeout,
       before_cutover: before_cutover,
       after_cutover: after_cutover
@@ -308,7 +308,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # is in S3. Download it and boot the initial peer with new code directly,
     # instead of starting with old code and waiting for the Poller to re-upgrade.
     {code_paths, peer_opts} = resolve_startup_code(otp_app)
-    peer_opts = Keyword.put(peer_opts, :endpoint, state.endpoint)
+    peer_opts = Keyword.put(peer_opts, :endpoints, state.endpoints)
 
     start_time = System.monotonic_time(:millisecond)
 
@@ -426,7 +426,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
                state.otp_app,
                new_paths,
                release_dir,
-               state.endpoint,
+               state.endpoints,
                state.active_node
              ) do
           {:ok, peer_pid, peer_node} ->
@@ -697,10 +697,10 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     end)
   end
 
-  defp start_new_peer(otp_app, code_paths, release_dir, endpoint, active_node) do
+  defp start_new_peer(otp_app, code_paths, release_dir, endpoints, active_node) do
     try do
       opts = if release_dir, do: [release_dir: release_dir], else: []
-      opts = if endpoint, do: Keyword.put(opts, :endpoint, endpoint), else: opts
+      opts = Keyword.put(opts, :endpoints, endpoints)
       opts = if active_node, do: Keyword.put(opts, :active_node, active_node), else: opts
       {peer_pid, peer_node} = start_peer(otp_app, code_paths, opts)
       {:ok, peer_pid, peer_node}
@@ -792,9 +792,7 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
     # Inject SO_REUSEPORT so both old and new peers can bind the same port
     # simultaneously during cutover, eliminating the brief gap where neither
     # peer is listening.
-    endpoint = Keyword.get(opts, :endpoint)
-
-    if endpoint do
+    for endpoint <- Keyword.get(opts, :endpoints, []) do
       inject_reuseport(node, otp_app, endpoint)
     end
 

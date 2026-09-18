@@ -51,7 +51,13 @@ defmodule FlyDeploy.BlueGreen do
 
   - `:otp_app` - Your OTP application name (required)
   - `:start` - `{module, function, args}` MFA for starting your supervision tree (required)
-  - `:endpoint` - Your Phoenix Endpoint module (auto-detected if not given)
+  - `:endpoint` - Your single Phoenix Endpoint module (backward-compatible shorthand)
+  - `:endpoints` - List of Phoenix Endpoint modules whose Bandit HTTP listeners need
+    port sharing, for example `[MyAppWeb.Endpoint, MyAppWeb.InternalEndpoint]`.
+    Cannot be combined with `:endpoint`. If neither option is given, the conventional
+    `MyAppWeb.Endpoint` is auto-detected. Pass `[]` to disable endpoint configuration.
+    Cold deploy when changing this list: the parent retains it for subsequent upgrades,
+    and both outgoing and incoming listeners must start with port sharing enabled.
   - `:poll_interval` - How often to poll S3 in ms (default: 1000)
   - `:shutdown_timeout` - Max time in ms to wait for the outgoing peer to shut down
     before force-killing it. `nil` (default) means wait indefinitely, trusting
@@ -94,6 +100,8 @@ defmodule FlyDeploy.BlueGreen do
   defp do_start_link(children, opts) do
     {mod, fun, args} = Keyword.fetch!(opts, :start)
     otp_app = Keyword.fetch!(opts, :otp_app)
+    endpoints = configured_endpoints(opts)
+    opts = opts |> Keyword.delete(:endpoint) |> Keyword.put(:endpoints, endpoints)
 
     if Application.get_env(:fly_deploy, :__role__) == :peer do
       # Cache parent node in persistent_term so put_handoff/get_handoff work
@@ -125,6 +133,34 @@ defmodule FlyDeploy.BlueGreen do
     else
       # Dev/test — just run normally, no peers
       apply(mod, fun, args)
+    end
+  end
+
+  @doc false
+  def configured_endpoints(opts) do
+    if Keyword.has_key?(opts, :endpoint) and Keyword.has_key?(opts, :endpoints) do
+      raise ArgumentError, "cannot specify both :endpoint and :endpoints"
+    end
+
+    endpoints =
+      case Keyword.fetch(opts, :endpoints) do
+        {:ok, endpoints} -> endpoints
+        :error -> if endpoint = Keyword.get(opts, :endpoint), do: [endpoint], else: nil
+      end
+
+    case endpoints do
+      nil ->
+        nil
+
+      endpoints when is_list(endpoints) ->
+        if Enum.all?(endpoints, &(is_atom(&1) and &1 not in [nil, true, false])) do
+          Enum.uniq(endpoints)
+        else
+          raise ArgumentError, ":endpoints must be a list of endpoint modules"
+        end
+
+      _ ->
+        raise ArgumentError, ":endpoints must be a list of endpoint modules"
     end
   end
 
@@ -202,7 +238,7 @@ defmodule FlyDeploy.BlueGreen do
     FlyDeploy.BlueGreen.Supervisor.start_link(
       otp_app: otp_app,
       children: children,
-      endpoint: Keyword.get(opts, :endpoint),
+      endpoints: Keyword.get(opts, :endpoints),
       poll_interval: Keyword.get(opts, :poll_interval, 1_000),
       shutdown_timeout: Keyword.get(opts, :shutdown_timeout),
       before_cutover: Keyword.get(opts, :before_cutover),

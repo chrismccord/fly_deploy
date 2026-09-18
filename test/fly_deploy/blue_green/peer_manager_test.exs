@@ -90,4 +90,41 @@ defmodule FlyDeploy.BlueGreen.PeerManagerTest do
 
     capture_log(fn -> :ok = Supervisor.stop(sup) end)
   end
+
+  test "initial peer enables port sharing for every configured endpoint" do
+    endpoints = [Public.Endpoint, Internal.Endpoint]
+
+    {:ok, sup} =
+      Supervisor.start_link(
+        [{PeerManager, otp_app: :logger, endpoints: endpoints}],
+        strategy: :one_for_one
+      )
+
+    %{active_node: peer_node} = :sys.get_state(PeerManager)
+
+    try do
+      for endpoint <- endpoints do
+        config = :erpc.call(peer_node, Application, :fetch_env!, [:logger, endpoint])
+        options = get_in(config, [:http, :thousand_island_options, :transport_options])
+        assert options[:reuseport]
+        assert options[:reuseaddr]
+
+        # Exercise the transport options with two simultaneously bound listeners.
+        {:ok, outgoing} = :gen_tcp.listen(0, options ++ [ip: {127, 0, 0, 1}, active: false])
+
+        try do
+          {:ok, {_, port}} = :inet.sockname(outgoing)
+
+          assert {:ok, incoming} =
+                   :gen_tcp.listen(port, options ++ [ip: {127, 0, 0, 1}, active: false])
+
+          :gen_tcp.close(incoming)
+        after
+          :gen_tcp.close(outgoing)
+        end
+      end
+    after
+      capture_log(fn -> :ok = Supervisor.stop(sup) end)
+    end
+  end
 end

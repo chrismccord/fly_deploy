@@ -15,7 +15,7 @@ defmodule FlyDeploy.BlueGreen.Supervisor do
   def init(opts) do
     otp_app = Keyword.fetch!(opts, :otp_app)
     parent_children = Keyword.get(opts, :children, [])
-    endpoint = Keyword.get(opts, :endpoint)
+    endpoints = FlyDeploy.BlueGreen.configured_endpoints(opts)
     poll_interval = Keyword.get(opts, :poll_interval, 1_000)
     shutdown_timeout = Keyword.get(opts, :shutdown_timeout)
     before_cutover = Keyword.get(opts, :before_cutover)
@@ -27,7 +27,7 @@ defmodule FlyDeploy.BlueGreen.Supervisor do
           {Task.Supervisor, name: FlyDeploy.BlueGreen.TaskSupervisor},
           {FlyDeploy.BlueGreen.PeerManager,
            otp_app: otp_app,
-           endpoint: endpoint,
+           endpoints: endpoints,
            shutdown_timeout: shutdown_timeout,
            before_cutover: before_cutover,
            after_cutover: after_cutover},
