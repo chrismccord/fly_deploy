@@ -109,17 +109,16 @@ Set up AWS credentials for storage:
 fly storage create -a myapp -n my-releases-bucket
 ```
 
-Or for existing creds:
+Or for existing credentials:
 
 ```bash
 fly secrets set AWS_ACCESS_KEY_ID=<key> AWS_SECRET_ACCESS_KEY=<secret>
 ```
 
-You will also need to set a secret on the app of the Fly API token for the orchestrator machine:
-
-```bash
-fly secrets set FLY_API_TOKEN="$(fly tokens create machine-exec)"
-```
+Authenticate the Fly CLI with `fly auth login`, `FLY_API_TOKEN`, or
+`FLY_ACCESS_TOKEN`. FlyDeploy lists target Machines locally before launching the
+temporary orchestrator, passing only their IDs and regions—not your API token.
+You do not need to store a Fly API token as an app secret.
 
 ### 2. Add Startup Hook
 
@@ -194,7 +193,6 @@ This ensures machines that restart remain consistent with machines that were hot
 Required:
 - `AWS_ACCESS_KEY_ID` - S3 access key
 - `AWS_SECRET_ACCESS_KEY` - S3 secret key
-- `FLY_API_TOKEN` - Fly API token (usually auto-set)
 - `FLY_APP_NAME` - Application name (auto-set by Fly)
 - `FLY_IMAGE_REF` - Docker image reference (auto-set by Fly)
 
