@@ -337,7 +337,9 @@ FlyDeploy stores two types of objects in S3:
 
 ### Release Tarballs
 
-Path: `releases/<app>-<version>.tar.gz`
+Path: `releases/<app>-<version>-<upgrade_id>.tar.gz` (blue-green: `...-<upgrade_id>-blue_green.tar.gz`)
+
+Each deploy writes its own object, keyed by the upgrade id derived from the source image ref, so an app whose mix version never changes doesn't overwrite one key on every deploy. After each deploy, tarballs of that mode that `<app>-current.json` no longer references are deleted, so the bucket keeps one hot and one blue-green tarball.
 
 Contains all `.beam` files from `/app/lib/**/ebin/*.beam` with relative paths like:
 ```

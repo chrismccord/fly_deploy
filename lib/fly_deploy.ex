@@ -88,7 +88,11 @@ defmodule FlyDeploy do
 
   The hot upgrade system stores two types of objects in S3/Tigris:
 
-  `mix release` tarballs - `releases/<app>-<version>.tar.gz`
+  `mix release` tarballs - `releases/<app>-<version>-<upgrade_id>.tar.gz`
+  - One object per deploy (`<upgrade_id>` comes from the source image ref), so
+    deploys of an unchanged mix version never overwrite each other
+  - Tarballs no longer referenced by `<app>-current.json` are deleted after each
+    deploy (per mode)
   - Contains all `.beam` files from `/app/lib/**/ebin/*.beam`
   - Organized with relative paths like `lib/my_app-1.2.3/ebin/Elixir.MyModule.beam`
   - Authenticated downloads using AWS SigV4
@@ -102,7 +106,7 @@ defmodule FlyDeploy do
       "hot_upgrade": {
         "version": "1.2.3",
         "source_image_ref": "registry.fly.io/my-app:deployment-01K94R...",
-        "tarball_url": "https://t3.storage.dev/bucket/releases/my_app-1.2.3.tar.gz",
+        "tarball_url": "https://t3.storage.dev/bucket/releases/my_app-1.2.3-<upgrade_id>.tar.gz",
         "deployed_at": "2024-01-15T10:30:00Z"
       }
     }
@@ -491,7 +495,7 @@ defmodule FlyDeploy do
   ## Process
 
   1. Build tarball from `/app/lib/**/ebin/*.beam`
-  2. Upload to S3 at `releases/<app>-<version>.tar.gz`
+  2. Upload to S3 at `releases/<app>-<version>-<upgrade_id>.tar.gz`
   3. Update metadata at `releases/<app>-current.json`
   4. Get list of running machines from Fly API
   5. Trigger `hot_upgrade/2` on each machine via RPC

@@ -118,12 +118,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
   {
     "image_ref": "registry.fly.io/app:deployment-ABC",
     "blue_green_upgrade": {
-      "tarball_url": "https://s3/.../app-0.2.0.tar.gz",
+      "tarball_url": "https://s3/.../app-0.2.0-DEF-blue_green.tar.gz",
       "source_image_ref": "registry.fly.io/app:deployment-DEF",
       ...
     },
     "hot_upgrade": {
-      "tarball_url": "https://s3/.../app-0.2.1.tar.gz",
+      "tarball_url": "https://s3/.../app-0.2.1-GHI.tar.gz",
       "source_image_ref": "registry.fly.io/app:deployment-GHI",
       ...
     }

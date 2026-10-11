@@ -1,6 +1,8 @@
 ## Unreleased
 
 ### Bug Fixes
+- S3 listing percent-encodes the `/` in the `prefix` query parameter. Unencoded, the SigV4 signature didn't match (`SignatureDoesNotMatch` on Tigris), the error was swallowed, and `cleanup_old_results` never deleted anything.
+- Give every deploy its own tarball object, `releases/<app>-<version>-<upgrade_id>.tar.gz` (blue-green: `...-blue_green.tar.gz`). Keyed by version alone, an app that never bumps its mix version overwrote one object on every deploy, so `current.json` could point at one deploy while its `tarball_url` served another's beams. After each deploy, tarballs of that mode that `current.json` no longer references are deleted, so the bucket keeps one hot and one blue-green tarball — apps that do bump their version no longer keep every old tarball.
 - Blue-green: trap exits in `PeerManager` so `terminate/2` runs when the parent node shuts down (SIGTERM, `fly machine stop`, cold deploy). Previously the supervisor's exit signal killed PeerManager before it could send `:init.stop()` to the peer, so the peer was halted without running the app's shutdown callbacks (no Endpoint drain, no `terminate/2` on user processes).
 - `FlyDeploy.Components.hot_reload_css`: the element `id` used an EEx-style `"...#{@asset}"` interpolation inside a quoted HEEx attribute, which is not interpolated — every instance rendered the literal id `fly-deploy-css-reload-#{@asset}`, so two instances (different `:asset`) on one page collided. Switched to `id={"...#{@asset}"}`.
 

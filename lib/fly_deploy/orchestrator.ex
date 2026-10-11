@@ -43,25 +43,27 @@ defmodule FlyDeploy.Orchestrator do
     try do
       acquire_lock(app, image_ref, bucket)
 
+      upgrade_id = upgrade_id_from_ref(image_ref)
+
       # step 1: Build tarball (includes marker file with upgrade info)
       {tarball_path, tarball_info} = build_tarball(app, image_ref, version)
 
       # step 2: Upload to Tigris
-      url = upload_to_tigris(tarball_path, app, version, bucket)
+      url = upload_to_tigris(tarball_path, app, version, upgrade_id, bucket)
 
       # step 3: Update current state with hot upgrade info
       update_current_state_with_hot_upgrade(url, app, image_ref, version, bucket)
 
       # step 4: Wait for machines to pick up and apply the upgrade (via polling)
-      upgrade_id = upgrade_id_from_ref(image_ref)
       results = wait_for_machine_upgrades(app, upgrade_id, bucket, timeout)
 
       duration = System.monotonic_time(:millisecond) - start_time
 
       print_summary(results, tarball_info, duration)
 
-      # step 5: Clean up old results (keep last 5)
+      # step 5: Clean up old results (keep last 5) and unreferenced tarballs
       cleanup_old_results(app, bucket, 5)
+      cleanup_unreferenced_tarballs(app, bucket, image_ref, mode)
     after
       # always release the lock, even if deployment fails
       release_lock(app, bucket)
@@ -383,19 +385,19 @@ defmodule FlyDeploy.Orchestrator do
     {all_files, info}
   end
 
-  defp upload_to_tigris(tarball_path, app, version, bucket) do
+  @doc false
+  # Blue-green and hot tarballs must coexist (PeerManager restores the former,
+  # the peer's Poller the latter), hence the separate suffix.
+  def tarball_object_key(app, version, upgrade_id, mode) do
+    suffix = if mode == "blue_green", do: "-blue_green", else: ""
+    "releases/#{app}-#{version}-#{upgrade_id}#{suffix}.tar.gz"
+  end
+
+  defp upload_to_tigris(tarball_path, app, version, upgrade_id, bucket) do
     IO.puts(ansi([:yellow], "--> Uploading to S3"))
 
     mode = System.get_env("DEPLOY_MODE", "hot")
-    # Use separate S3 keys for blue-green vs hot tarballs so they don't overwrite each other.
-    # On restart, PeerManager downloads the blue-green tarball (full release) and the peer's
-    # Poller downloads the hot tarball (beam-only). Both must coexist in S3.
-    object_key =
-      if mode == "blue_green" do
-        "releases/#{app}-#{version}-blue_green.tar.gz"
-      else
-        "releases/#{app}-#{version}.tar.gz"
-      end
+    object_key = tarball_object_key(app, version, upgrade_id, mode)
 
     content = File.read!(tarball_path)
     url = "#{s3_endpoint()}/#{bucket}/#{object_key}"
@@ -850,8 +852,62 @@ defmodule FlyDeploy.Orchestrator do
     end
   end
 
+  # Decides from S3 as it is now, not from the state this run wrote: a deploy
+  # that took the lock meanwhile (--force, or lock expiry during a long wait)
+  # may have uploaded a tarball it is about to reference.
+  defp cleanup_unreferenced_tarballs(app, bucket, deployment_id, mode) do
+    with {:ok, %{"deployment_id" => ^deployment_id}} <-
+           get_s3_json(bucket, "releases/#{app}-deploy.lock"),
+         {:ok, state} <- get_s3_json(bucket, "releases/#{app}-current.json"),
+         {:ok, keys} <- list_s3_objects(bucket, "releases/#{app}-") do
+      deleted =
+        keys
+        |> stale_tarball_keys(app, mode, state)
+        |> Enum.count(&(delete_s3_object(bucket, &1) == :ok))
+
+      if deleted > 0 do
+        IO.puts(ansi([:white], "    Cleaned up #{deleted} old tarball(s)"))
+      end
+    end
+
+    :ok
+  end
+
+  @doc false
+  # Each mode sweeps only its own kind, so a hot deploy can never delete the
+  # blue-green tarball a restarting machine still needs.
+  def stale_tarball_keys(keys, app, mode, state) do
+    prefix = "releases/#{app}-"
+    blue_green? = mode == "blue_green"
+    field = if blue_green?, do: "blue_green_upgrade", else: "hot_upgrade"
+    referenced_url = get_in(state, [field, "tarball_url"])
+
+    Enum.filter(keys, fn key ->
+      String.starts_with?(key, prefix) and String.ends_with?(key, ".tar.gz") and
+        String.ends_with?(key, "-blue_green.tar.gz") == blue_green? and
+        not (is_binary(referenced_url) and String.ends_with?(referenced_url, "/" <> key))
+    end)
+  end
+
+  defp get_s3_json(bucket, key) do
+    case Req.get("#{s3_endpoint()}/#{bucket}/#{key}",
+           receive_timeout: 10_000,
+           connect_options: [timeout: 10_000],
+           headers: [{"x-tigris-consistent", "true"}],
+           aws_sigv4: [
+             access_key_id: aws_access_key_id(),
+             secret_access_key: aws_secret_access_key(),
+             service: "s3",
+             region: aws_region()
+           ]
+         ) do
+      {:ok, %{status: 200, body: body}} when is_map(body) -> {:ok, body}
+      _ -> :error
+    end
+  end
+
   defp list_s3_objects(bucket, prefix) do
-    url = "#{s3_endpoint()}/#{bucket}?list-type=2&prefix=#{URI.encode(prefix)}"
+    url = "#{s3_endpoint()}/#{bucket}?list-type=2&prefix=#{URI.encode_www_form(prefix)}"
 
     case Req.get(url,
            receive_timeout: 10_000,
@@ -887,24 +943,25 @@ defmodule FlyDeploy.Orchestrator do
         Enum.any?(upgrade_ids, fn id -> String.contains?(key, "#{prefix}#{id}/") end)
       end)
 
-    # Delete each object
-    Enum.reduce(objects_to_delete, 0, fn key, count ->
-      url = "#{s3_endpoint()}/#{bucket}/#{key}"
+    Enum.count(objects_to_delete, &(delete_s3_object(bucket, &1) == :ok))
+  end
 
-      case Req.delete(url,
-             receive_timeout: 5_000,
-             connect_options: [timeout: 5_000],
-             headers: [{"x-tigris-consistent", "true"}],
-             aws_sigv4: [
-               access_key_id: aws_access_key_id(),
-               secret_access_key: aws_secret_access_key(),
-               service: "s3",
-               region: aws_region()
-             ]
-           ) do
-        {:ok, %{status: status}} when status in 200..299 -> count + 1
-        _ -> count
-      end
-    end)
+  defp delete_s3_object(bucket, key) do
+    url = "#{s3_endpoint()}/#{bucket}/#{key}"
+
+    case Req.delete(url,
+           receive_timeout: 5_000,
+           connect_options: [timeout: 5_000],
+           headers: [{"x-tigris-consistent", "true"}],
+           aws_sigv4: [
+             access_key_id: aws_access_key_id(),
+             secret_access_key: aws_secret_access_key(),
+             service: "s3",
+             region: aws_region()
+           ]
+         ) do
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      _ -> :error
+    end
   end
 end
