@@ -275,6 +275,12 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
   @impl true
   def init(opts) do
+    # Without trapping exits, the supervisor's shutdown signal kills this
+    # process outright: terminate/2 never runs, and the peer, whose control
+    # connection this process owns, dies with it before its own supervision
+    # tree can drain. Trapping exits turns a SIGTERM on the machine into a
+    # graceful `:init.stop()` of the peer.
+    Process.flag(:trap_exit, true)
     :ets.new(@handoff_table, [:named_table, :public, :set, write_concurrency: true])
 
     otp_app = Keyword.fetch!(opts, :otp_app)
@@ -375,6 +381,11 @@ defmodule FlyDeploy.BlueGreen.PeerManager do
 
     {:stop, {:peer_died, reason}, state}
   end
+
+  # Trapping exits turns exits from linked processes, such as a replaced
+  # peer's control process, into messages. Peers are watched by monitor, so
+  # these carry nothing to act on.
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl true
   def terminate(reason, state) do

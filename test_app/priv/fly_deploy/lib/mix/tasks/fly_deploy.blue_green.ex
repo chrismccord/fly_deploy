@@ -22,15 +22,8 @@ defmodule Mix.Tasks.FlyDeploy.BlueGreen do
 
   ## Options
 
-  Accepts all the same options as `mix fly_deploy.hot` except `--mode`:
-
-    * `--config` - Path to fly.toml file (default: "fly.toml")
-    * `--skip-build` - Skip building and use existing image (requires --image)
-    * `--image` - Use specific pre-built image
-    * `--build-arg` - Pass build-time variables to Docker (can be used multiple times)
-    * `--dry-run` - Show what would be done without executing
-    * `--force` - Override deployment lock (use with caution)
-    * `--lock-timeout` - Lock expiry timeout in seconds (default: 300)
+  Accepts all the same options as `mix fly_deploy.hot` except `--mode`.
+  See `Mix.Tasks.FlyDeploy.Hot` for the full list.
   """
 
   use Mix.Task
